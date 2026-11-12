@@ -1,27 +1,51 @@
-# PBI 01 — exploratory data analysis
+# ST1519 Agile MLOps CA1
 
-Place `customers_base.csv`, `orders_base.csv` and `labels_base.csv` alongside `lab1.ipynb`. These source files are excluded from Git. The notebook reads them without modifying them and shows the evidence behind the quality register and PBI 02/03 recommendations in `reports/`.
+`CA1.ipynb` is the main local development notebook. Keep `customers_base.csv`, `orders_base.csv` and `labels_base.csv` alongside it; these raw files and the local `artifacts/` directory are ignored by Git. The notebook runs historical EDA, full-data cleaning, training-only preprocessing and the six validation baseline models. The original full-history EDA examined labels before the test holdout existed; do not use test outcomes for current model selection.
 
-Use Python 3.11 or newer and set up a virtual environment:
+## Start the existing project environment
+
+From the project folder on macOS:
 
 ```bash
-python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install pandas numpy matplotlib seaborn jupyterlab nbconvert ipykernel scikit-learn joblib
-jupyter lab lab1.ipynb
+jupyter lab CA1.ipynb
 ```
 
-Run all cells from the notebook directory. For a command-line verification that writes the executed outputs back into the notebook:
+In JupyterLab, confirm the kernel at the top right is **Python (Agile MLOps CA1)**. If it is not, choose **Kernel → Change Kernel** and select that name. Then choose **Run → Run All Cells**. In VS Code, select the same kernel or the interpreter `.venv/bin/python` before running the notebook. The notebook runs with Python 3.13; the kernel is installed within `.venv` and is found when JupyterLab is launched from that environment.
+
+## Recreate the environment if needed
+
+These commands use `uv` to obtain Python 3.13 and create a project-local environment. The kernel registration is local to that environment.
 
 ```bash
-jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=600 lab1.ipynb
+uv venv --python 3.13 --seed .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m ipykernel install --sys-prefix --name ca1-project --display-name "Python (Agile MLOps CA1)"
+jupyter lab CA1.ipynb
 ```
 
-The data contain approximately 950,000 rows per file, so execution requires sufficient memory. Outputs are aggregate summaries; avoid sharing raw data or credentials. Run the notebook only on trusted data.
+The requirements pin the direct dependencies verified with Python 3.13.14. Avoid loading a saved joblib artifact with different library versions or from an untrusted source. Recreating `.venv` does not require touching the ignored data or MLflow artifact directories.
+
+To run tests and execute the notebook from a fresh kernel:
+
+```bash
+python -m unittest discover -s tests -v
+jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.kernel_name=ca1-project --ExecutePreprocessor.timeout=600 CA1.ipynb
+```
+
+Each notebook run trains six baselines, runs the initial training-only search and selects thresholds from training-only folds. The advanced search is disabled by default and saved local MLflow runs are reused; keep `artifacts/mlflow/` intact. To rerun the approximately 9.5-minute advanced search, set `RUN_ADVANCED_SEARCH = True` in its notebook cell. The normal `train_benchmark` callable does not run the searches or threshold optimization. To view local runs, open a second terminal in the project folder:
+
+```bash
+source .venv/bin/activate
+mlflow ui --backend-store-uri sqlite:///artifacts/mlflow/mlflow.db --host 127.0.0.1 --port 5000
+```
+
+Open `http://127.0.0.1:5000` in a browser. Stop the UI with Ctrl+C. The notebook explicitly uses the local store. The reusable training API can use a separately configured tracking URI in future; do not put credentials in the repository.
 
 ## PBI 02 — reusable data cleaning
 
-`src/data_cleaning.py` contains `clean_customers`, `clean_orders`, `clean_labels` and `check_relationships`. The cleaners accept pandas DataFrames and return `(retained, rejected, report)`; they do not modify the inputs or write files. The notebook demonstrates the same functions on a small sample. A later pipeline can call them on each incoming batch. Run the representative checks with:
+`src/data_cleaning.py` contains `clean_customers`, `clean_orders`, `clean_labels` and `check_relationships`. The cleaners accept pandas DataFrames and return `(retained, rejected, report)`; they do not modify the inputs or write files. The notebook demonstrates the same functions on the full base datasets. A later pipeline can call them on each incoming batch. Run the representative checks with:
 
 ```bash
 python -m unittest discover -s tests -v
@@ -56,11 +80,13 @@ from src.feature_engineering import (
 customers = clean_customers(pd.read_csv("customers_base.csv", low_memory=False))[0]
 orders = clean_orders(pd.read_csv("orders_base.csv", low_memory=False))[0]
 labels = clean_labels(pd.read_csv("labels_base.csv", low_memory=False))[0]
-x_train, y_train, x_val, y_val, x_test, y_test, split_report = prepare_training_data(customers, orders, labels)
+x_train, y_train, x_val, y_val, _, _, split_report = prepare_training_data(
+    customers, orders, labels, include_test=False
+)
 preprocessor = fit_preprocessor(x_train)  # fit on training only
 train_matrix = preprocessor.transform(x_train)
 val_matrix = preprocessor.transform(x_val)
-# Keep x_test and y_test untouched until the final champion is selected.
+# Test features and labels are not returned during model development.
 weights = training_sample_weights(y_train)  # optional for a compatible estimator
 joblib.dump(preprocessor, "artifacts/pbi03_preprocessor.joblib")  # create artifacts/ first
 
@@ -69,6 +95,31 @@ joblib.dump(preprocessor, "artifacts/pbi03_preprocessor.joblib")  # create artif
 # future_matrix = joblib.load("artifacts/pbi03_preprocessor.joblib").transform(prepare_features(new_orders))
 ```
 
-Use validation to compare and tune models. Only after selecting the final champion, transform the held-out test features with the saved preprocessor and evaluate that model once; do not inspect test labels or use them for tuning.
+Choose hyperparameters and thresholds on training-only folds; use validation to compare the resulting models. Only after selecting the final champion, transform the held-out test features with the saved preprocessor and evaluate that model once; do not inspect test labels or use them for tuning.
 
 The base-data fitted artifact is saved locally at `artifacts/pbi03_preprocessor.joblib` and ignored by Git. Keep a trusted copy alongside each eventual model, with matching library versions. Never load a joblib file from an untrusted source. Run all tests with `python -m unittest discover -s tests -v`.
+
+## PBI 06 — fixed-model retraining interface
+
+Ephraim's future PBI 10 entry point can call the selected models without Jupyter or a search. Supply **unencoded, cleaned PBI 03 feature frames**, labels and the corresponding chronological split report. The function fits preprocessing on the training frame only, trains the fixed CatBoost and LightGBM configurations, evaluates validation using their recorded thresholds and returns local or shared MLflow run IDs, metrics and model/preprocessor/inference artifact URIs. It does not accept test data. No champion is registered.
+
+```python
+import os
+from src.train_hq import train_selected_models
+
+# x_train, y_train, x_val, y_val and split_report come from
+# prepare_training_data(cleaned_customers, cleaned_orders, cleaned_labels,
+#                       include_test=False).
+results = train_selected_models(
+    x_train, y_train, x_val, y_val, split_report,
+    tracking_uri=os.environ.get("MLFLOW_TRACKING_URI"),
+    batch_name="example-batch",
+)
+for result in results:
+    print(result["model"], result["run_id"], result["threshold"], result["metrics"])
+    print(result["model_uri"], result["preprocessor_uri"], result["inference_uri"])
+```
+
+If `tracking_uri` and `MLFLOW_TRACKING_URI` are unset, runs are local under `artifacts/mlflow/`. Configure the shared URI and any credentials outside the repository; connectivity and artifact storage on AWS have **not** been verified. `split_report` is a caller-supplied contract: use PBI 03 to ensure the dates and rows actually correspond. Applying saved thresholds to a new batch does not guarantee the same accuracy; monitor drift and assess on a properly separated validation period. The user's historical EDA examined full-data labels before the holdout existed.
+
+The final 15-version comparison in `CA1.ipynb` loads the original local runs and does not perform tuning or threshold searches on Run All. If the local MLflow database or its artifacts are missing, restore `artifacts/mlflow/` from backup; the notebook deliberately fails rather than inventing results. This interface is not the full PBI 10 ETL pipeline.
