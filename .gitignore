@@ -10,3 +10,6 @@
 .venv/
 .ipynb_checkpoints/
 __pycache__/
+
+# Locally fitted preprocessing artifacts
+/artifacts/
