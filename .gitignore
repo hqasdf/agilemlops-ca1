@@ -1,0 +1,12 @@
+# Local datasets and secrets must stay out of version control
+*.csv
+!reports/data_quality_register.csv
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store
+.venv/
+.ipynb_checkpoints/
+__pycache__/
