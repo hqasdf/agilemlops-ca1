@@ -58,3 +58,17 @@ Each member sets the MLflow client tracking URI to the shared EB URL (no trailin
 ## Out of scope
 
 PBI 05 does not train or compare each member's models, select the champion, implement PBI 04 RDS, orchestrate PBI 10, or complete the storage-hardening work of PBI 12.
+
+## Evidence captured — 14 November 2026
+
+Evidence files are in `reports/pbi05_evidence/`:
+
+- `01-elastic-beanstalk-healthy.png` — Elastic Beanstalk environment reported Healthy/Ok.
+- `02-mlflow-ui-available.png` — MLflow 3.17.2 UI opened at the deployed environment URL.
+- `03-owner-run-completed.png` — Nithish's tracking smoke-test run finished and its metric is visible. The parameter and text artifact were also confirmed in the run UI by the owner; this screenshot is the run overview.
+- `04-model-registry-version-1.png` — `pbi05_registry_smoke_test`, Version 1, is visible in the registry.
+- `mlflow-eb.zip` — exact Dockerfile-only source ZIP deployed to Elastic Beanstalk.
+
+Deployed ZIP SHA-256: `D330E002C119A378D68300916FC5A60C56973AF8B7E4FF6248EB2D9ECFE00E28`.
+
+Progress boundary: these results verify the owner's deployment and smoke checks. The acceptance criterion requiring all three members to log **and retrieve** parameters, metrics, and an artifact remains pending until each teammate's result is recorded. The environment was terminated after these checks to conserve AWS Academy credits; restore or redeploy it before teammate testing. The local SQLite database and artifact directory are baseline-only and are not claimed to be durable; PBI 12 owns that improvement.
