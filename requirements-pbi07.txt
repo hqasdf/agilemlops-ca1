@@ -1,0 +1,9 @@
+# Runtime used by src/train_nithish.py and PBI07_Nithish_models.ipynb.
+# Exact active versions are embedded in each MLflow model artifact.
+numpy>=1.26,<3.0
+pandas>=2.1,<3.0
+scikit-learn>=1.4,<2.0
+matplotlib>=3.8,<4.0
+seaborn>=0.13,<1.0
+mlflow>=3.0,<4.0
+ipykernel>=6.29,<7.0

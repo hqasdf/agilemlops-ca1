@@ -57,7 +57,8 @@ def prepare_features(orders):
     return features[INPUT_FEATURES]
 
 
-def prepare_training_data(customers, orders, labels):
+def prepare_training_data(customers, orders, labels, *, include_test=True,
+                         include_training_dates=False):
     """Join cleaned tables, split chronologically and return features and counts.
 
     Labels with no order or no valid order date are excluded and counted.
@@ -65,7 +66,11 @@ def prepare_training_data(customers, orders, labels):
     Rows with missing customer matches remain because order features are usable.
     Whole dates are assigned to training, validation or test at the 70th
     and 85th percentile rows. Fractions can differ when many orders share a date.
-    Test labels are returned for final evaluation and are not summarized here.
+    By default, test features and labels are returned for final evaluation.
+    Call with ``include_test=False`` to retain only test counts/date metadata
+    without materialising its feature or label arrays. Call with
+    ``include_training_dates=True`` to append per-row training dates to the
+    return tuple. Both options preserve the historical default return shape.
     """
     _check_keys(customers, CUSTOMER_KEY, "customers")
     _check_keys(orders, ORDER_KEY, "orders")
@@ -116,9 +121,13 @@ def prepare_training_data(customers, orders, labels):
         "train_test_customers": len(train_customers.intersection(test_customers)),
         "validation_test_customers": len(val_customers.intersection(test_customers)),
     }
-    return (prepare_features(train_rows), train_rows["is_fraud"].astype(int),
-            prepare_features(val_rows), val_rows["is_fraud"].astype(int),
-            prepare_features(test_rows), test_rows["is_fraud"], report)
+    result = (prepare_features(train_rows), train_rows["is_fraud"].astype(int),
+              prepare_features(val_rows), val_rows["is_fraud"].astype(int),
+              prepare_features(test_rows) if include_test else None,
+              test_rows["is_fraud"] if include_test else None, report)
+    if include_training_dates:
+        result += (train_rows["order_date"].copy(),)
+    return result
 
 
 def fit_preprocessor(train_features):
