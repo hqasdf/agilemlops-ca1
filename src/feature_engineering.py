@@ -67,7 +67,9 @@ def prepare_training_data(customers, orders, labels, include_test=True, include_
     and 85th percentile rows. Fractions can differ when many orders share a date.
     Test labels are returned for final evaluation and are not summarized here.
     Set include_test=False to avoid constructing test features or returning labels.
-    Optionally return aligned training dates in the report, never as features.
+    When include_training_dates=True, aligned training dates are included in the
+    report and appended as an eighth return value. The default seven-item return
+    shape remains unchanged for existing callers.
     """
     _check_keys(customers, CUSTOMER_KEY, "customers")
     _check_keys(orders, ORDER_KEY, "orders")
@@ -122,10 +124,12 @@ def prepare_training_data(customers, orders, labels, include_test=True, include_
         report["training_dates"] = train_rows["order_date"].copy()
     x_test = prepare_features(test_rows) if include_test else None
     y_test = test_rows["is_fraud"] if include_test else None
-    return (prepare_features(train_rows), train_rows["is_fraud"].astype(int),
-            prepare_features(val_rows), val_rows["is_fraud"].astype(int),
-            x_test, y_test, report)
-
+    result = (prepare_features(train_rows), train_rows["is_fraud"].astype(int),
+              prepare_features(val_rows), val_rows["is_fraud"].astype(int),
+              x_test, y_test, report)
+    if include_training_dates:
+        result += (train_rows["order_date"].copy(),)
+    return result
 
 def fit_preprocessor(train_features):
     """Fit imputation, scaling and encoding on training features only."""

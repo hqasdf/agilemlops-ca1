@@ -13,3 +13,6 @@ __pycache__/
 
 # Locally fitted preprocessing artifacts
 /artifacts/
+
+# Local MLflow tracking database and artifacts
+mlflow-data/
