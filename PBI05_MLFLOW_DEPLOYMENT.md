@@ -71,4 +71,17 @@ Evidence files are in `reports/pbi05_evidence/`:
 
 Deployed ZIP SHA-256: `D330E002C119A378D68300916FC5A60C56973AF8B7E4FF6248EB2D9ECFE00E28`.
 
-Progress boundary: these results verify the owner's deployment and smoke checks. The acceptance criterion requiring all three members to log **and retrieve** parameters, metrics, and an artifact remains pending until each teammate's result is recorded. The environment was terminated after these checks to conserve AWS Academy credits; restore or redeploy it before teammate testing. The local SQLite database and artifact directory are baseline-only and are not claimed to be durable; PBI 12 owns that improvement.
+Progress boundary: these results verify the owner's deployment and smoke checks. The environment was terminated after those checks to conserve AWS Academy credits. It was restored on 16 November, and the MLflow UI became reachable again. The latest Elastic Beanstalk health state has not been captured.
+
+## Teammate smoke test — 16 November 2026
+
+The MLflow Experiments page showed PBI05-teammate-smoke-test at the restored endpoint. This confirms that the browser reached the service and the experiment was created.
+
+Evidence files:
+
+- reports/pbi05_evidence/05-teammate-experiment-created.png — the experiment is visible in the MLflow UI.
+- reports/pbi05_evidence/06-teammate-runs-page-error.png — the Runs page displayed INTERNAL_ERROR. Its screenshot also shows an old example filter (metrics.rmse < 1 and params.model = "tree") and the state filter set to Active.
+
+These screenshots do not confirm that teammate-connection-check finished, that connection_test = 1.0 was logged, or that test.txt was retrieved. This attempt verifies endpoint access and experiment creation only. The acceptance criterion requiring every member to log and retrieve a parameter, metric, and artifact remains pending. Retry after clearing the filter and selecting All or Finished, then record the run ID and verify the metric and artifact.
+
+The local SQLite database and artifact directory are baseline-only and are not claimed to be durable; PBI 12 owns that improvement.
