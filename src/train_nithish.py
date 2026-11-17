@@ -1,8 +1,8 @@
 """PBI 07 - Nithish's fraud models (three versions, one change at a time).
 
-    v1_logistic_default      logistic regression, cut-off 0.5
-    v2_logistic_tuned_cutoff same model, cut-off chosen on recent training data
-    v3_boosting_tuned_cutoff gradient boosting, same features, same cut-off rule
+    v1_logistic_default      tuned logistic regression, cut-off 0.5
+    v2_logistic_tuned_cutoff same tuned model, cut-off chosen on recent training data
+    v3_boosting_tuned_cutoff tuned gradient boosting, same features and cut-off rule
 
 All versions use the team's PBI 02 cleaning and PBI 03 chronological split.
 The outer validation period is shared with the team. A chronological slice of
@@ -132,18 +132,33 @@ def boosting_pipeline():
     return Pipeline([("prepare", prepare), ("model", model)])
 
 
+HYPERPARAMETER_GRIDS = {
+    logistic_pipeline: [
+        {"C": 0.1}, {"C": 1.0}, {"C": 10.0},
+    ],
+    boosting_pipeline: [
+        {"learning_rate": 0.05, "max_leaf_nodes": 7, "min_samples_leaf": 100, "l2_regularization": 0.0},
+        {"learning_rate": 0.05, "max_leaf_nodes": 7, "min_samples_leaf": 300, "l2_regularization": 0.0},
+        {"learning_rate": 0.05, "max_leaf_nodes": 15, "min_samples_leaf": 100, "l2_regularization": 0.0},
+        {"learning_rate": 0.05, "max_leaf_nodes": 15, "min_samples_leaf": 300, "l2_regularization": 0.0},
+        {"learning_rate": 0.10, "max_leaf_nodes": 7, "min_samples_leaf": 100, "l2_regularization": 1.0},
+        {"learning_rate": 0.10, "max_leaf_nodes": 7, "min_samples_leaf": 300, "l2_regularization": 1.0},
+        {"learning_rate": 0.10, "max_leaf_nodes": 15, "min_samples_leaf": 100, "l2_regularization": 1.0},
+        {"learning_rate": 0.10, "max_leaf_nodes": 15, "min_samples_leaf": 300, "l2_regularization": 1.0},
+    ],
+}
+
 VERSIONS = {
     "v1_logistic_default": {"build": logistic_pipeline, "tune_cutoff": False,
                             "threshold_rule": "fixed 0.5",
-                            "change": "baseline: explainable logistic regression, cut-off 0.5"},
+                            "change": "tuned logistic model; fixed 0.5 cut-off"},
     "v2_logistic_tuned_cutoff": {"build": logistic_pipeline, "tune_cutoff": True,
                                  "threshold_rule": "maximum F1 on latest 20% of outer training dates",
-                                 "change": "same model as v1; cut-off chosen on recent training data"},
+                                 "change": "same tuned logistic model as v1; calibrated cut-off"},
     "v3_boosting_tuned_cutoff": {"build": boosting_pipeline, "tune_cutoff": True,
                                   "threshold_rule": "maximum F1 on latest 20% of outer training dates",
-                                 "change": "same features and cut-off rule as v2; gradient boosting model"},
+                                  "change": "tuned gradient boosting with the shared feature and split policy"},
 }
-
 
 # --------------------------------------------------------------------------- cut-off
 
@@ -156,6 +171,43 @@ def recent_training_window(train_dates, share=TUNING_WINDOW):
     if recent.all() or not recent.any():
         raise ValueError("Training needs at least two different order dates")
     return recent
+
+
+def tune_hyperparameters(build, x_train, y_train, fit_dates):
+    """Select settings on an earlier date slice; never use calibration/validation/test rows."""
+    if build not in HYPERPARAMETER_GRIDS:
+        raise ValueError("No hyperparameter search is defined for this model family")
+    inner_later = recent_training_window(fit_dates)
+    inner_fit = ~inner_later
+    x_fit = x_train.loc[fit_dates.index]
+    y_fit = y_train.loc[fit_dates.index]
+    if y_fit.loc[inner_fit].nunique() < 2 or y_fit.loc[inner_later].nunique() < 2:
+        raise ValueError("Hyperparameter tuning needs both classes in each chronological slice")
+
+    trials = []
+    for parameters in HYPERPARAMETER_GRIDS[build]:
+        candidate = build()
+        candidate.set_params(**{f"model__{key}": value for key, value in parameters.items()})
+        candidate.fit(x_fit.loc[inner_fit], y_fit.loc[inner_fit])
+        scores = candidate.predict_proba(x_fit.loc[inner_later])[:, 1]
+        score = float(average_precision_score(y_fit.loc[inner_later], scores))
+        trials.append({"parameters": parameters, "average_precision": score})
+
+    winner = max(range(len(trials)), key=lambda i: trials[i]["average_precision"])
+    return {
+        "selection_metric": "average_precision",
+        "selection_reason": "Fraud is imbalanced; average precision compares ranking without choosing an operating threshold.",
+        "candidate_count": len(trials),
+        "candidate_results": trials,
+        "best_parameters": trials[winner]["parameters"],
+        "best_average_precision": trials[winner]["average_precision"],
+        "inner_fit_rows": int(inner_fit.sum()),
+        "inner_tuning_rows": int(inner_later.sum()),
+        "inner_fit_start": str(fit_dates.loc[inner_fit].min().date()),
+        "inner_fit_end": str(fit_dates.loc[inner_fit].max().date()),
+        "inner_tuning_start": str(fit_dates.loc[inner_later].min().date()),
+        "inner_tuning_end": str(fit_dates.loc[inner_later].max().date()),
+    }
 
 
 def best_f1_cutoff(y, scores):
@@ -223,7 +275,7 @@ def _figures(y_val, scores, cutoff, metrics, title):
 
 
 def _log_run(version, spec, model, cutoff, metrics, x_val, y_val, scores, report, seconds, batch_name,
-             model_fit_rows, threshold_calibration_rows, train_dates):
+             model_fit_rows, threshold_calibration_rows, train_dates, tuning):
     with mlflow.start_run(run_name=f"{MEMBER}-{batch_name}-{version}") as run:
         mlflow.set_tags({"member": MEMBER, "member_name": MEMBER_NAME, "pbi": "07", "model_version": version,
                          "model_name": type(model[-1]).__name__, "dataset": "validation",
@@ -232,6 +284,8 @@ def _log_run(version, spec, model, cutoff, metrics, x_val, y_val, scores, report
         mlflow.log_params({
             "threshold": cutoff, "batch_name": batch_name, "seed": SEED,
             "threshold_rule": spec["threshold_rule"],
+            "hyperparameter_selection_metric": tuning["selection_metric"],
+            "selected_hyperparameters": str(tuning["best_parameters"]),
             "features": ", ".join(FEATURES), "class_weighting": "balanced",
             "excluded": "ids, refund_value, 50-day customer totals (timing unverified)",
             "train_rows": report["training_rows"], "validation_rows": report["validation_rows"],
@@ -250,7 +304,9 @@ def _log_run(version, spec, model, cutoff, metrics, x_val, y_val, scores, report
             if isinstance(model[-1], LogisticRegression) else
             "ordinal category encoding, native missing values, monotonic -1 on days_since_first_order"
         ))
-        mlflow.log_metrics({**metrics, "training_seconds": seconds})
+        mlflow.log_metrics({**metrics, "training_seconds": seconds,
+                            "tuning_inner_average_precision": tuning["best_average_precision"]})
+        mlflow.log_dict(tuning, "hyperparameter_search.json")
         curve, confusion = _figures(y_val, scores, cutoff, metrics, version)
         mlflow.log_figure(curve, "precision_recall.png")
         mlflow.log_figure(confusion, "confusion_matrix.png")
@@ -322,13 +378,18 @@ def train_nithish_models(customers, orders, labels, tracking_uri=None, experimen
         _set_tracking(tracking_uri, experiment_name)
     recent = recent_training_window(train_dates)
     fit_rows = ~recent
-    fitted, cutoffs, results = {}, {}, []
+    fitted, tuned, cutoffs, results = {}, {}, {}, []
     for version in requested_versions:
         spec = VERSIONS[version]
         build = spec["build"]
         start = perf_counter()
-        if build not in fitted:                          # versions of a model family share one fitted model
-            fitted[build] = build().fit(x_train.loc[fit_rows], y_train.loc[fit_rows])
+        if build not in fitted:                          # versions of a model family share one tuned model
+            tuning = tune_hyperparameters(build, x_train, y_train, train_dates.loc[fit_rows])
+            model = build()
+            model.set_params(**{f"model__{key}": value
+                                for key, value in tuning["best_parameters"].items()})
+            fitted[build] = model.fit(x_train.loc[fit_rows], y_train.loc[fit_rows])
+            tuned[build] = tuning
         if spec["tune_cutoff"] and build not in cutoffs:
             cutoffs[build] = choose_cutoff(fitted[build], x_train, y_train, train_dates)
         seconds = perf_counter() - start
@@ -339,10 +400,12 @@ def train_nithish_models(customers, orders, labels, tracking_uri=None, experimen
                   "metrics": metrics, "training_seconds": seconds, "model": model, "scores": scores,
                   "model_fit_rows": int(fit_rows.sum()), "threshold_calibration_rows": int(recent.sum()),
                   "threshold_rule": spec["threshold_rule"],
+                  "hyperparameter_search": tuned[build],
                   "tracking_uri": mlflow.get_tracking_uri() if log else None}
         if log:
             run_id = _log_run(version, spec, model, cutoff, metrics, x_val, y_val, scores,
-                              report, seconds, batch_name, int(fit_rows.sum()), int(recent.sum()), train_dates)
+                              report, seconds, batch_name, int(fit_rows.sum()), int(recent.sum()), train_dates,
+                              tuned[build])
             result.update({"run_id": run_id, "model_uri": f"runs:/{run_id}/model"})
         results.append(result)
     return results
