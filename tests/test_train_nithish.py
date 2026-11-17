@@ -66,7 +66,8 @@ class TrainNithishTests(unittest.TestCase):
         x_train, _, x_val, _, train_dates, report = self.data
         self.assertLess(report["train_last_date"], report["validation_first_date"])
         self.assertEqual(len(train_dates), len(x_train))
-        self.assertEqual(len(x_train) + len(x_val) + report["test_rows"], 3000)
+        self.assertEqual(len(x_train) + len(x_val), 3000)
+        self.assertNotIn("test_rows", report)
 
     def test_cutoff_window_uses_latest_training_dates_only(self):
         train_dates = self.data[4]

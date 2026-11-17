@@ -57,28 +57,30 @@ def prepare_features(orders):
     return features[INPUT_FEATURES]
 
 
-def prepare_training_data(customers, orders, labels, include_test=True, include_training_dates=False):
-    """Join cleaned tables, split chronologically and return features and counts.
+def prepare_training_data(customers, orders, labels, include_test=False,
+                          include_training_dates=False, validation_start_date=None):
+    """Join development-only tables and return training and validation data.
 
-    Labels with no order or no valid order date are excluded and counted.
-    Customers are checked but their snapshot values are never used as features.
-    Rows with missing customer matches remain because order features are usable.
-    Whole dates are assigned to training, validation or test at the 70th
-    and 85th percentile rows. Fractions can differ when many orders share a date.
-    Test labels are returned for final evaluation and are not summarized here.
-    Set include_test=False to avoid constructing test features or returning labels.
-    When include_training_dates=True, aligned training dates are included in the
-    report and appended as an eighth return value. The default seven-item return
-    shape remains unchanged for existing callers.
+    Callers must first use ``load_development_tables`` so sealed test records
+    are excluded before cleaning or joining. This function never constructs,
+    transforms, returns or summarizes test features or labels. Whole dates are
+    kept together. Pass the original validation boundary when reproducing the
+    historical split; otherwise 70% of the supplied development rows are used
+    to choose a chronological train/validation boundary.
     """
     _check_keys(customers, CUSTOMER_KEY, "customers")
     _check_keys(orders, ORDER_KEY, "orders")
     _check_keys(labels, ORDER_KEY, "labels")
+    order_dates = pd.to_datetime(orders["order_date"], errors="coerce", format="mixed")
+    if (order_dates >= pd.Timestamp("2023-04-14")).any():
+        raise ValueError("Input includes sealed test-period orders; use the development-only CSV loader")
     if labels[CUSTOMER_KEY].isna().any().any():
         raise ValueError("labels has missing customer keys")
     if "is_fraud" not in labels:
         raise ValueError("labels must contain is_fraud")
 
+    if include_test:
+        raise ValueError("Test data are sealed and cannot be returned by this function")
     rows = labels.merge(orders, on=ORDER_KEY, how="left", validate="one_to_one", indicator="order_match")
     rows = rows.merge(customers[CUSTOMER_KEY], on=CUSTOMER_KEY, how="left", validate="many_to_one", indicator="customer_match")
     unmatched_orders = int((rows["order_match"] == "left_only").sum())
@@ -93,40 +95,34 @@ def prepare_training_data(customers, orders, labels, include_test=True, include_
     if len(rows) < 3:
         raise ValueError("At least three dated matched orders are needed")
     sorted_dates = rows["order_date"].sort_values().reset_index(drop=True)
-    validation_start = sorted_dates.iloc[int(len(sorted_dates) * 0.70)]
-    test_start = sorted_dates.iloc[int(len(sorted_dates) * 0.85)]
+    if validation_start_date is None:
+        validation_start = sorted_dates.iloc[int(len(sorted_dates) * 0.70)]
+    else:
+        validation_start = pd.Timestamp(validation_start_date)
     train_rows = rows.loc[rows["order_date"] < validation_start]
-    val_rows = rows.loc[(rows["order_date"] >= validation_start) & (rows["order_date"] < test_start)]
-    test_rows = rows.loc[rows["order_date"] >= test_start]
-    if train_rows.empty or val_rows.empty or test_rows.empty:
-        raise ValueError("The 70/15/15 date split produced an empty set; more varied dates are needed")
+    val_rows = rows.loc[rows["order_date"] >= validation_start]
+    if train_rows.empty or val_rows.empty:
+        raise ValueError("The chronological train/validation split produced an empty set")
     if not train_rows["is_fraud"].isin([0, 1]).all() or not val_rows["is_fraud"].isin([0, 1]).all():
         raise ValueError("Training and validation labels must be nonmissing binary values")
 
     train_customers = pd.MultiIndex.from_frame(train_rows[CUSTOMER_KEY]).unique()
     val_customers = pd.MultiIndex.from_frame(val_rows[CUSTOMER_KEY]).unique()
-    test_customers = pd.MultiIndex.from_frame(test_rows[CUSTOMER_KEY]).unique()
     report = {
         "labels_received": len(labels), "labels_without_orders": unmatched_orders,
         "labels_without_customers": unmatched_customers, "matched_orders_without_dates": missing_dates,
-        "training_rows": len(train_rows), "validation_rows": len(val_rows), "test_rows": len(test_rows),
+        "training_rows": len(train_rows), "validation_rows": len(val_rows),
         "train_first_date": str(train_rows["order_date"].min().date()),
         "train_last_date": str(train_rows["order_date"].max().date()),
         "validation_first_date": str(val_rows["order_date"].min().date()),
         "validation_last_date": str(val_rows["order_date"].max().date()),
-        "test_first_date": str(test_rows["order_date"].min().date()),
-        "test_last_date": str(test_rows["order_date"].max().date()),
         "train_validation_customers": len(train_customers.intersection(val_customers)),
-        "train_test_customers": len(train_customers.intersection(test_customers)),
-        "validation_test_customers": len(val_customers.intersection(test_customers)),
     }
     if include_training_dates:
         report["training_dates"] = train_rows["order_date"].copy()
-    x_test = prepare_features(test_rows) if include_test else None
-    y_test = test_rows["is_fraud"] if include_test else None
     result = (prepare_features(train_rows), train_rows["is_fraud"].astype(int),
               prepare_features(val_rows), val_rows["is_fraud"].astype(int),
-              x_test, y_test, report)
+              None, None, report)
     if include_training_dates:
         result += (train_rows["order_date"].copy(),)
     return result

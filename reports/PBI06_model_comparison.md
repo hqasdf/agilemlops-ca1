@@ -162,3 +162,45 @@ The frozen notebook comparison retains all 15 original runs and does not run hyp
 | Callable routine, dependencies and invocation for PBI 10 | **Met locally, integration pending:** `train_selected_models` accepts prepared training/validation frames, refits the two fixed configurations, applies fixed thresholds and logs artifacts. PBI 10 owner agreement and end-to-end invocation remain to be verified. |
 
 The fixed retraining interface was exercised on the base split without accessing test features or labels. Local runs **CatBoost `a32ff6b4cdae4476ac3be5b79e0ed56a`** and **LightGBM `9d929ed60986442c85394bf37444ca22`** reproduced the historical validation F1 scores of 0.5115 and 0.5103 respectively. Model, preprocessor and inference-threshold artifacts were reloaded; all validation predictions and probabilities matched the corresponding original runs exactly. Individual fit times were 3.24 s and 0.77 s; this is not the full PBI 10 pipeline time. The interface can accept an explicitly configured tracking URI, but no AWS connection was attempted.
+
+## Final seven-model baseline, tuning and threshold evaluation
+
+This additive experiment ran all seven requested model families. The original 15 model versions and their runs above remain unchanged. The final search used **three configurations per model and two expanding chronological whole-date folds** (42 candidate fits). Mean inner-fold fraud F1 at threshold 0.5 selected hyperparameters. The selected model was refit on the full training partition, then its threshold was selected from pooled training-only OOF probabilities. The selected model’s folds were also used for hyperparameter selection, so the OOF threshold estimate is optimistic. Outer validation was used only for final comparisons.
+
+The frozen dates and sizes were training **660,773** (2022-11-12–2023-03-14) and validation **144,978** (2023-03-15–2023-04-13). No test feature or label columns were loaded. The local one-time membership manifest contains only SHA-256 hashes of order keys; order keys and dates were read as split metadata. Earlier PBI 01 full-history EDA is retained as historical evidence and was not test-blind.
+
+The corrected final experiment is `19583bb26bce4c79ba8604592944f624` in local MLflow experiment `PBI06_FinalOptimization`. It has **7 baseline runs, 42 inner-fold candidate runs, 7 tuned-at-0.5 runs and 7 threshold-optimized runs**. Candidate model-fit time summed to **325.09 seconds**; the search loop took **331.56 seconds** including preprocessing and MLflow logging. The complete experiment took **453.95 seconds**.
+
+| Model | Baseline F1 | Tuned F1 @ 0.5 | Optimized F1 | Δ vs baseline | Threshold | Precision | Recall | AP | ROC-AUC | Accuracy | TN | FP | FN | TP | Final fit s | Candidate fit s | Predict s | Baseline run | Tuned run | Threshold run |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
+| xgboost | 0.4410 | 0.5119 | **0.5129** | +0.0719 | 0.560731 | 0.4442 | 0.6068 | 0.4779 | 0.8242 | 0.8431 | 110,248 | 14,990 | 7,762 | 11,978 | 0.889 | 3.43 | 0.058 | `f7fae4b7e9314fe8b4da5b3ea52d85d9` | `5917b71a9dac4e91a6374b0057dea984` | `b9f84bf7c76f4a1f9131f0b7ff444230` |
+| lightgbm | 0.4409 | 0.5114 | **0.5106** | +0.0697 | 0.560070 | 0.4429 | 0.6027 | 0.4851 | 0.8246 | 0.8427 | 110,271 | 14,967 | 7,842 | 11,898 | 0.887 | 4.55 | 0.095 | `3db0a44d3a5c40bfa3c1a3a3656c4db4` | `8a9e89cab6d445ee89737e130294e01c` | `1846ad55ad974483b5258b3a155272df` |
+| random_forest | 0.4411 | 0.5010 | **0.5101** | +0.0690 | 0.448313 | 0.4405 | 0.6057 | 0.4919 | 0.8245 | 0.8416 | 110,050 | 15,188 | 7,783 | 11,957 | 22.562 | 161.18 | 0.099 | `23959e83f5334153bc7f3f572572da74` | `c0177ca17cc5472487b92e61abc8510a` | `eabb91ccc7f045c28d3cc664b656e793` |
+| gradient_boosting | 0.4361 | 0.5095 | **0.5080** | +0.0720 | 0.542369 | 0.4400 | 0.6009 | 0.4629 | 0.8199 | 0.8415 | 110,142 | 15,096 | 7,878 | 11,862 | 37.638 | 120.91 | 0.074 | `df9f31a0d8e8428881c362dbb16bf20c` | `1b23e11e3f1b43a4bfdfa202786b339e` | `b7fd78632a3d42c3b6c253503ebbf5a8` |
+| hist_gradient_boosting | 0.4398 | 0.5122 | **0.5074** | +0.0677 | 0.570476 | 0.4479 | 0.5852 | 0.4775 | 0.8242 | 0.8453 | 111,002 | 14,236 | 8,189 | 11,551 | 4.278 | 15.14 | 0.147 | `fb73b04d9a5f408889a7e1f4b84e049b` | `13bb250dbac1448f9d106f6a3694e9e5` | `f0cdea3f63fb4e12a36f719086a377a6` |
+| catboost | 0.4443 | 0.5090 | **0.5068** | +0.0626 | 0.573579 | 0.4492 | 0.5814 | 0.4734 | 0.8228 | 0.8459 | 111,167 | 14,071 | 8,263 | 11,477 | 2.563 | 10.85 | 0.006 | `35ab93b45e3d4e75b7ab24f585638683` | `8a9a8964522345c98e8cc572acf6811e` | `65281b45bf024333be4fe5ac48645265` |
+| logistic_regression | 0.4246 | 0.4765 | **0.4799** | +0.0553 | 0.557376 | 0.4186 | 0.5623 | 0.4344 | 0.8111 | 0.8341 | 109,821 | 15,417 | 8,641 | 11,099 | 2.407 | 9.03 | 0.001 | `bfcb1f4cddd74871a3847cc86f86d453` | `64f24ab20fad4040b8b3cd43afbf24bb` | `306ea24b2edb44e194b8c5a5cf73faf4` |
+
+### Selected configurations
+
+- **xgboost:** `n_estimators=120`, `max_depth=5`, `learning_rate=0.08`, `reg_lambda=5`, `subsample=0.9`, `colsample_bytree=0.8`. Selected threshold **0.560731**.
+
+- **lightgbm:** `n_estimators=120`, `num_leaves=23`, `learning_rate=0.08`, `reg_lambda=5`, `min_child_samples=50`, `subsample=0.9`, `subsample_freq=1`, `colsample_bytree=0.8`. Selected threshold **0.560070**.
+
+- **random_forest:** `n_estimators=60`, `max_depth=12`, `min_samples_leaf=30`, `max_features=0.8`. Selected threshold **0.448313**.
+
+- **gradient_boosting:** `n_estimators=100`, `max_depth=3`, `learning_rate=0.1`, `subsample=0.8`, `min_samples_leaf=40`. Selected threshold **0.542369**.
+
+- **hist_gradient_boosting:** `max_iter=120`, `max_leaf_nodes=31`, `learning_rate=0.05`, `l2_regularization=5.0`. Selected threshold **0.570476**.
+
+- **catboost:** `iterations=120`, `depth=5`, `learning_rate=0.06`, `l2_leaf_reg=5`, `subsample=0.9`, `bootstrap_type=Bernoulli`. Selected threshold **0.573579**.
+
+- **logistic_regression:** `C=1.0`, `max_iter=500`. Selected threshold **0.557376**.
+
+### Result and limitations
+
+**XGBoost ranks first** at optimized validation fraud F1 **0.5129**, improving from baseline 0.4410 and tuned-at-0.5 0.5119. LightGBM is second at 0.5106 and Random Forest third at 0.5101. Recommend XGBoost and LightGBM for the next team review; keep Random Forest as a close third and note that it has the highest AP (0.4919) of these final thresholded candidates. Threshold optimization slightly improved XGBoost, Random Forest and Logistic Regression, and slightly lowered F1 for the other four. Report the measurements as observed; do not assume threshold tuning always helps.
+
+The 0.5 baseline class weighting yields high fraud recall but many false positives. The tuned/optimized candidates improve precision and reduce false positives at the cost of some recall; review capacity and missed-fraud costs should guide any operational choice. AP and ROC-AUC measure ranking quality independently of the selected threshold.
+
+The seven-model comparison is based on a single outer validation period, and the same inner folds informed hyperparameter and threshold selection. Treat the close model ranking and training OOF F1 as exploratory, not as an unbiased final performance estimate. The held-out test data remains sealed. Shared AWS MLflow is unverified; point-in-time-safe customer-history features remain unresolved and excluded; PBI 10 integration and its three-minute demonstration are still pending.

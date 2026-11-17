@@ -44,7 +44,7 @@ def _text(data, column, case=None):
 
 
 def _number(data, column, issues, integer=False):
-    original = data[column]
+    original = data[column].replace(r"^\s*$", pd.NA, regex=True)
     values = pd.to_numeric(original, errors="coerce")
     invalid = original.notna() & (values.isna() | ~np.isfinite(values))
     invalid = invalid | (values < 0).fillna(False)
@@ -55,10 +55,11 @@ def _number(data, column, issues, integer=False):
     data[column] = values.mask(invalid).astype("Float64")
     if integer:
         data[column] = data[column].astype("Int64")
+    return invalid
 
 
 def _date(data, column, issues):
-    original = data[column]
+    original = data[column].replace(r"^\s*$", pd.NA, regex=True)
     # Naive dates have no timezone assumption; timezone-bearing dates are not
     # silently shifted and are treated as invalid for this source schema.
     parsed = pd.to_datetime(original, errors="coerce", format="mixed")
@@ -66,9 +67,11 @@ def _date(data, column, issues):
         raise ValueError(f"{column} must contain timezone-naive dates")
     issues[column + "_invalid"] = int((original.notna() & parsed.isna()).sum())
     data[column] = parsed
+    return original.notna() & parsed.isna()
 
 
-def _finish(original, data, key, invalid_key, issues, invalid_target=None):
+def _finish(original, data, key, invalid_key, issues, invalid_target=None, flags=None,
+            category_values=None):
     # Only raw exact duplicates are dropped; other repeated keys are quarantined.
     exact = original.duplicated(keep="first")
     conflicts = data.loc[~exact].duplicated(key, keep=False).reindex(data.index, fill_value=False)
@@ -88,12 +91,23 @@ def _finish(original, data, key, invalid_key, issues, invalid_target=None):
     before = original.loc[~reject].astype("string").fillna("<missing>")
     after = retained.astype("string").fillna("<missing>")
     changed = before.ne(after).any(axis=1)
+    flagged_records = []
+    flags = flags or {}
+    for position in range(len(data)):
+        row_issues = [name for name, mask in flags.items() if bool(mask.iloc[position])]
+        if row_issues:
+            row = {"source_row": position + 2, "issues": row_issues}
+            row.update({column: original.iloc[position][column] for column in key if column in original})
+            flagged_records.append(row)
     report = {
         "received": len(original), "changed": int(changed.sum()),
         "rejected": int(reject.sum()), "retained": len(retained),
         "exact_duplicate_rows": int(exact.sum()),
         "conflicting_key_rows": int(conflicts.sum()),
         "invalid_key_rows": int(invalid_key.sum()),
+        "missing_values": data.isna().sum().astype(int).to_dict(),
+        "flagged_records": flagged_records,
+        "category_values": category_values or {},
         "issues": issues,
     }
     return retained.reset_index(drop=True), rejected.reset_index(drop=True), report
@@ -104,21 +118,25 @@ def clean_customers(data):
     original = _start(data, CUSTOMER_COLUMNS)
     result = original.copy()
     issues = {}
+    flags = {}
     _text(result, "country_code", "upper")
     _text(result, "customer_id")
     mobile = result["mobile_verified"].astype("string").str.strip().str.lower()
     result["mobile_verified"] = mobile.map({"true": True, "false": False}).astype("boolean")
-    issues["mobile_verified_unrecognized"] = int((mobile.notna() & result["mobile_verified"].isna()).sum())
+    flags["mobile_verified_unrecognized"] = mobile.notna() & result["mobile_verified"].isna()
+    issues["mobile_verified_unrecognized"] = int(flags["mobile_verified_unrecognized"].sum())
     counts = ["num_orders_last_50days", "num_cancelled_orders_last_50days",
               "num_refund_orders_last_50days", "num_associated_customers"]
     for column in counts:
-        _number(result, column, issues, integer=True)
-    _number(result, "total_payment_last_50days", issues)
-    _date(result, "first_order_datetime", issues)
-    issues["cancellations_exceed_orders"] = int((result[counts[1]] > result[counts[0]]).fillna(False).sum())
-    issues["refunds_exceed_orders"] = int((result[counts[2]] > result[counts[0]]).fillna(False).sum())
+        flags[column + "_invalid"] = _number(result, column, issues, integer=True)
+    flags["total_payment_last_50days_invalid"] = _number(result, "total_payment_last_50days", issues)
+    flags["first_order_datetime_invalid"] = _date(result, "first_order_datetime", issues)
+    flags["cancellations_exceed_orders"] = (result[counts[1]] > result[counts[0]]).fillna(False)
+    flags["refunds_exceed_orders"] = (result[counts[2]] > result[counts[0]]).fillna(False)
+    issues["cancellations_exceed_orders"] = int(flags["cancellations_exceed_orders"].sum())
+    issues["refunds_exceed_orders"] = int(flags["refunds_exceed_orders"].sum())
     invalid_key = result["customer_id"].isna() | ~result["country_code"].str.fullmatch(r"[A-Z]{2}", na=False)
-    return _finish(original, result, ["country_code", "customer_id"], invalid_key, issues)
+    return _finish(original, result, ["country_code", "customer_id"], invalid_key, issues, flags=flags)
 
 
 def clean_orders(data):
@@ -126,17 +144,26 @@ def clean_orders(data):
     original = _start(data, ORDER_COLUMNS)
     result = original.copy()
     issues = {}
+    flags = {}
     _text(result, "country_code", "upper")
     _text(result, "order_id")
     _text(result, "collect_type", "lower")
     _text(result, "payment_method")
-    _number(result, "order_value", issues)
-    _number(result, "num_items_ordered", issues, integer=True)
-    _number(result, "refund_value", issues)
-    _date(result, "order_date", issues)
-    issues["refund_exceeds_order_value"] = int((result["refund_value"] > result["order_value"]).fillna(False).sum())
+    flags["order_value_invalid"] = _number(result, "order_value", issues)
+    flags["num_items_ordered_invalid"] = _number(result, "num_items_ordered", issues, integer=True)
+    flags["refund_value_invalid"] = _number(result, "refund_value", issues)
+    flags["order_date_invalid"] = _date(result, "order_date", issues)
+    flags["refund_exceeds_order_value"] = (result["refund_value"] > result["order_value"]).fillna(False)
+    issues["refund_exceeds_order_value"] = int(flags["refund_exceeds_order_value"].sum())
+    # No official category vocabulary is defined, so preserve new categories and
+    # report what was observed instead of rejecting unfamiliar values.
+    category_values = {
+        "collect_type": sorted(result["collect_type"].dropna().unique().tolist()),
+        "payment_method": sorted(result["payment_method"].dropna().unique().tolist()),
+    }
     invalid_key = result["order_id"].isna() | ~result["country_code"].str.fullmatch(r"[A-Z]{2}", na=False)
-    return _finish(original, result, ["country_code", "order_id"], invalid_key, issues)
+    return _finish(original, result, ["country_code", "order_id"], invalid_key, issues,
+                   flags=flags, category_values=category_values)
 
 
 def clean_labels(data):
@@ -144,16 +171,19 @@ def clean_labels(data):
     original = _start(data, LABEL_COLUMNS)
     result = original.copy()
     issues = {}
+    flags = {}
     _text(result, "country_code", "upper")
     _text(result, "order_id")
     _text(result, "customer_id")
-    target = pd.to_numeric(result["is_fraud"], errors="coerce")
+    target = pd.to_numeric(result["is_fraud"].replace(r"^\s*$", pd.NA, regex=True), errors="coerce")
     invalid_target = ~target.isin([0, 1])
     issues["invalid_or_missing_fraud_labels"] = int(invalid_target.sum())
     result["is_fraud"] = target.where(~invalid_target).astype("Int64")
     invalid_key = result["order_id"].isna() | result["customer_id"].isna()
     invalid_key |= ~result["country_code"].str.fullmatch(r"[A-Z]{2}", na=False)
-    return _finish(original, result, ["country_code", "order_id"], invalid_key, issues, invalid_target)
+    flags["invalid_or_missing_fraud_label"] = invalid_target
+    return _finish(original, result, ["country_code", "order_id"], invalid_key, issues,
+                   invalid_target, flags)
 
 
 def check_relationships(customers, orders, labels):
@@ -179,4 +209,31 @@ def check_relationships(customers, orders, labels):
         "orders_without_labels": order_matches.loc[order_matches["_merge"] == "right_only", order_key],
         "labels_without_customers": customer_matches.loc[customer_matches["_merge"] == "left_only", customer_key],
         "customers_without_labels": customer_matches.loc[customer_matches["_merge"] == "right_only", customer_key],
+    }
+
+
+def compare_batch_keys(incoming, historical, key_columns):
+    """Describe key overlap without writing to or changing historical data.
+
+    Duplicate keys within either input are rejected as ambiguous. Overlapping
+    keys are returned for PBI 10 to reconcile; key overlap alone cannot tell
+    whether payloads are identical or conflicting.
+    """
+    for name, data in [("incoming", incoming), ("historical", historical)]:
+        missing = [column for column in key_columns if column not in data.columns]
+        if missing:
+            raise ValueError(f"{name} data is missing key columns: {missing}")
+        if data[key_columns].isna().any().any() or data.duplicated(key_columns).any():
+            raise ValueError(f"{name} data contains missing or duplicate keys: {key_columns}")
+    comparison = incoming[key_columns].merge(
+        historical[key_columns], on=key_columns, how="left", indicator=True, validate="one_to_one"
+    )
+    existing = comparison.loc[comparison["_merge"] == "both", key_columns].reset_index(drop=True)
+    new = comparison.loc[comparison["_merge"] == "left_only", key_columns].reset_index(drop=True)
+    return {
+        "incoming_count": len(incoming),
+        "already_in_history_count": len(existing),
+        "new_key_count": len(new),
+        "already_in_history": existing,
+        "new_keys": new,
     }
