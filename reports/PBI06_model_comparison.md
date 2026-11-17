@@ -204,3 +204,19 @@ The corrected final experiment is `19583bb26bce4c79ba8604592944f624` in local ML
 The 0.5 baseline class weighting yields high fraud recall but many false positives. The tuned/optimized candidates improve precision and reduce false positives at the cost of some recall; review capacity and missed-fraud costs should guide any operational choice. AP and ROC-AUC measure ranking quality independently of the selected threshold.
 
 The seven-model comparison is based on a single outer validation period, and the same inner folds informed hyperparameter and threshold selection. Treat the close model ranking and training OOF F1 as exploratory, not as an unbiased final performance estimate. The held-out test data remains sealed. Shared AWS MLflow is unverified; point-in-time-safe customer-history features remain unresolved and excluded; PBI 10 integration and its three-minute demonstration are still pending.
+
+## Shared eight-feature comparison (additive, 17 November 2026)
+
+This is a new experiment family logged to `PBI06_SharedEightFeature`; no historical seven-feature runs or metrics were changed. It reuses the selected seven-model configurations for XGBoost, LightGBM and HistGradientBoosting without searching. Preprocessing and models are fit on the oldest 80% of the outer training dates; the newest 20% of whole training dates selects each threshold by fraud F1. The same fitted model scores calibration and outer validation. Validation metrics do not select thresholds, and sealed test records are not passed to the training function. The older full-training threshold-0.5 baseline numbers below are historical context and are not a controlled single-variable comparison because fitting rows and features differ.
+
+| Model | Historical 7-feature validation F1 | New 8-feature F1 at 0.5 | New 8-feature threshold / F1 | Precision | Recall | AP | ROC-AUC | FP | FN | Fit seconds | Prediction seconds | New local MLflow run |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| XGBoost | 0.5129 | 0.5561 | 0.6170 / 0.5283 | 0.5179 | 0.5392 | 0.5245 | 0.8482 | 9,909 | 9,097 | 0.759 | 0.051 | `3ee48762b5dc47328044962b586f3e61` |
+| LightGBM | 0.5106 | 0.5533 | 0.6314 / 0.5238 | 0.5208 | 0.5268 | 0.5227 | 0.8483 | 9,568 | 9,341 | 0.808 | 0.109 | `5bb07b0208f244cd882ae044e205122b` |
+| HistGradientBoosting | 0.5074 | 0.5546 | 0.6321 / 0.5210 | 0.5279 | 0.5143 | 0.5211 | 0.8476 | 9,079 | 9,588 | 2.998 | 0.145 | `48dcd210896d420990e3b8ca41ed53da` |
+
+At fixed 0.5, F1 increased by 0.0432, 0.0427 and 0.0472 respectively relative to the historical seven-feature runs. With the training-only thresholds, F1 is higher than those historical numbers by 0.0154, 0.0132 and 0.0136, respectively, but lower than each new run's own 0.5 result. This highlights calibration/validation drift and the tradeoff from a threshold selected on a separate, earlier training period. These are validation comparisons, not test results. XGBoost has the highest new calibrated validation F1 (0.5283), narrowly ahead of LightGBM (0.5238); neither is a champion without team review and point-in-time feature verification.
+
+The current HGB version receives shared one-hot encoded inputs. Its prior native categorical handling and monotonic constraint were removed because the shared transformed layout does not retain a safe mapping of original-feature constraints to encoded columns. This changes the estimator's inductive bias; the measured result above is a new version and must not be compared as though only the eighth feature changed.
+
+The new results are stored additively with model and preprocessor artifacts, inference threshold metadata, parameters, validation metrics, and confusion/precision-recall figures. The ordinary notebook does not run tuning searches. The first-order timestamp's provenance and the order-to-customer key needed at inference remain unresolved; see the PBI 03 report.

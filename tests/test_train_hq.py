@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
-from src import feature_engineering
+from src import feature_engineering, train_hq
 from src.data_cleaning import clean_orders
 from src.feature_engineering import fit_preprocessor, prepare_features
 from src.train_hq import (model_candidates, rank_results, train_benchmark, validation_metrics,
@@ -150,7 +150,10 @@ class TrainingTests(unittest.TestCase):
 
     def test_new_models_serialize_with_balanced_sample_weights(self):
         raw = pd.DataFrame([order(order_id=str(i), order_value=i + 1) for i in range(30)])
-        features = prepare_features(clean_orders(raw)[0])
+        raw["customer_id"] = "c1"
+        from src.data_cleaning import clean_customers
+        customers = clean_customers(pd.DataFrame([customer()]))[0]
+        features = prepare_features(clean_orders(raw)[0], customers)
         preprocessor = fit_preprocessor(features)
         matrix = preprocessor.transform(features).astype(np.float32)
         labels = np.array([0, 1] * 15)
@@ -372,9 +375,12 @@ class TrainingTests(unittest.TestCase):
                 load_finalized_results(report)
 
     def test_saved_model_and_preprocessor_reload(self):
+        from src.data_cleaning import clean_customers
         raw = pd.DataFrame([order(order_id=str(i), order_value=i + 1) for i in range(6)])
+        raw["customer_id"] = "c1"
         orders = clean_orders(raw)[0]
-        features = prepare_features(orders)
+        customers, _, _ = clean_customers(pd.DataFrame([customer()]))
+        features = prepare_features(orders, customers)
         preprocessor = fit_preprocessor(features)
         matrix = preprocessor.transform(features)
         model = LogisticRegression(random_state=42).fit(matrix, [0, 1, 0, 1, 0, 1])
@@ -399,9 +405,9 @@ class TrainingTests(unittest.TestCase):
         orders = pd.DataFrame(orders)
         labels = pd.DataFrame(labels)
         original = feature_engineering.prepare_features
-        def no_test_features(frame):
+        def no_test_features(frame, customer_frame):
             self.assertLess(frame["order_date"].max(), pd.Timestamp("2023-02-10"))
-            return original(frame)
+            return original(frame, customer_frame)
         candidates = {"logistic_regression": LogisticRegression(class_weight="balanced", random_state=42)}
         with patch.object(feature_engineering, "prepare_features", side_effect=no_test_features), \
              patch("src.train_hq.model_candidates", return_value=candidates), \
@@ -423,6 +429,51 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(first[0]["version"], "baseline")
         self.assertEqual(first[0]["threshold"], 0.5)
         self.assertEqual(set(model_candidates()), {"logistic_regression", "random_forest", "hist_gradient_boosting", "gradient_boosting", "xgboost", "lightgbm", "catboost"})
+
+    def test_shared_eight_feature_comparison_uses_train_only_calibration(self):
+        from src.data_cleaning import clean_customers, clean_labels
+        from src.feature_engineering import prepare_training_data
+
+        customers = clean_customers(pd.DataFrame([customer()]))[0]
+        order_rows = []
+        label_rows = []
+        for i in range(100):
+            day = pd.Timestamp("2023-01-01") + pd.Timedelta(days=i)
+            order_rows.append(order(order_id=str(i), order_date=day, order_value=i + 1))
+            label_rows.append(label(order_id=str(i), is_fraud=i % 2))
+        orders = clean_orders(pd.DataFrame(order_rows))[0]
+        labels = clean_labels(pd.DataFrame(label_rows))[0]
+        x_train, y_train, x_val, y_val, _, _, report, dates = prepare_training_data(
+            customers, orders, labels, include_training_dates=True
+        )
+        config = {"logistic_regression": {
+            "params": {"C": 1.0, "max_iter": 100}, "weight_strength": 0.5,
+            "source_run_id": "saved-config",
+        }}
+        fitted_indices = []
+        original_fit = train_hq.fit_preprocessor
+
+        def training_only(frame):
+            fitted_indices.append(frame.index.copy())
+            return original_fit(frame)
+
+        with patch("src.train_hq._tracking", return_value="local-test"), \
+             patch("src.train_hq._log_run", return_value="new-eight-feature-run"), \
+             patch("src.train_hq.fit_preprocessor", side_effect=training_only):
+            first = train_hq.train_shared_feature_comparison(
+                x_train, y_train, dates, x_val, y_val, report, config
+            )
+            changed_validation = train_hq.train_shared_feature_comparison(
+                x_train, y_train, dates, x_val, 1 - y_val, report, config
+            )
+        self.assertEqual(len(fitted_indices), 2)
+        self.assertTrue(all(index.isin(x_train.index).all() for index in fitted_indices))
+        result = first["results"][0]
+        changed_result = changed_validation["results"][0]
+        self.assertEqual(result["threshold"], changed_result["threshold"])
+        self.assertEqual(result["calibration_f1"], changed_result["calibration_f1"])
+        self.assertEqual(result["fit_rows"] + result["calibration_rows"], len(x_train))
+        self.assertEqual(result["run_id"], "new-eight-feature-run")
 
 
 if __name__ == "__main__":

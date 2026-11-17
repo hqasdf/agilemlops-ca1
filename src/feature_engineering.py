@@ -1,9 +1,4 @@
-"""Shared, leakage-conscious feature preparation for fraud classification.
-
-Inputs are retained DataFrames from PBI 02 cleaning. No model is trained here.
-Use prepare_training_data, fit_preprocessor, then the returned preprocessor's
-transform method. For later orders, call prepare_features before transform.
-"""
+"""Shared eight-feature preparation and training-only preprocessing for CA1."""
 
 import numpy as np
 import pandas as pd
@@ -14,12 +9,18 @@ from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, RobustScal
 from sklearn.utils.class_weight import compute_sample_weight
 
 
-NUMERIC_FEATURES = ["order_value", "num_items_ordered"]
-DATE_FEATURES = ["order_weekday", "order_month"]
-CATEGORICAL_FEATURES = ["country_code", "collect_type", "payment_method"]
-INPUT_FEATURES = NUMERIC_FEATURES + DATE_FEATURES + CATEGORICAL_FEATURES
 ORDER_KEY = ["country_code", "order_id"]
 CUSTOMER_KEY = ["country_code", "customer_id"]
+
+NUMERIC_FEATURES = [
+    "order_value", "num_items_ordered", "days_since_first_order",
+]
+DATE_FEATURES = ["order_weekday", "order_month"]
+CATEGORICAL_FEATURES = ["country_code", "collect_type", "payment_method"]
+INPUT_FEATURES = [
+    "order_value", "num_items_ordered", "order_weekday", "order_month",
+    "country_code", "collect_type", "payment_method", "days_since_first_order",
+]
 
 
 def _check_keys(data, keys, name):
@@ -30,77 +31,122 @@ def _check_keys(data, keys, name):
         raise ValueError(f"{name} has missing or duplicate composite keys: {keys}")
 
 
-def prepare_features(orders):
-    """Build allowed order-time features for training or future inference.
+def _dates(values, column):
+    parsed = pd.to_datetime(values, errors="coerce", format="mixed")
+    if isinstance(parsed.dtype, pd.DatetimeTZDtype):
+        raise ValueError(f"{column} must contain timezone-naive dates")
+    return parsed.dt.normalize()
 
-    Pass cleaned orders. IDs, refund information and customer snapshots are
-    never selected. Missing dates are allowed here and imputed by the fitted
-    pipeline; training/evaluation splitting requires a known order date.
+
+def prepare_features(orders, customers):
+    """Join cleaned customer history and return the shared ordered schema.
+
+    A first-order timestamp is used only when it is on or before the order date.
+    Missing, invalid and future timestamps become missing values. The feature is
+    safe only if ``first_order_datetime`` is an as-of historical first-order
+    value; confirm its source definition before production use.
     """
-    required = NUMERIC_FEATURES + CATEGORICAL_FEATURES + ["order_date"]
+    required = [
+        "country_code", "order_id", "customer_id", "order_value",
+        "num_items_ordered", "collect_type", "payment_method", "order_date",
+    ]
     missing = [column for column in required if column not in orders.columns]
     if missing:
-        raise ValueError(f"Orders are missing feature columns: {missing}")
-    features = orders[NUMERIC_FEATURES + CATEGORICAL_FEATURES].copy()
-    for column in NUMERIC_FEATURES:
-        features[column] = pd.to_numeric(features[column], errors="raise").astype(float)
-        values = features[column].dropna()
-        if (values < 0).any() or not np.isfinite(values).all():
-            raise ValueError(f"{column} must contain nonnegative finite values or missing values")
-    for column in CATEGORICAL_FEATURES:
-        features[column] = features[column].astype(object).where(features[column].notna(), np.nan)
-    dates = pd.to_datetime(orders["order_date"], errors="raise")
-    if not pd.api.types.is_datetime64_any_dtype(dates) or isinstance(dates.dtype, pd.DatetimeTZDtype):
-        raise ValueError("order_date must contain timezone-naive dates")
+        raise ValueError(f"Orders are missing required feature/join columns: {missing}")
+    if "first_order_datetime" not in customers.columns:
+        raise ValueError("Customers are missing required column: first_order_datetime")
+
+    _check_keys(orders, ORDER_KEY, "orders")
+    _check_keys(customers, CUSTOMER_KEY, "customers")
+    order_rows = orders.reset_index(drop=True).copy()
+    order_rows["_source_position"] = np.arange(len(order_rows))
+    customer_history = customers[CUSTOMER_KEY + ["first_order_datetime"]]
+    joined = order_rows.merge(
+        customer_history, on=CUSTOMER_KEY, how="left", validate="many_to_one",
+        indicator="customer_match",
+    ).sort_values("_source_position")
+
+    order_dates = _dates(joined["order_date"], "order_date")
+    first_dates = _dates(joined["first_order_datetime"], "first_order_datetime")
+    days = (order_dates - first_dates).dt.days.astype(float)
+    joined["days_since_first_order"] = days.where(days >= 0)
+
+    features = joined[[
+        "order_value", "num_items_ordered", "order_date", "country_code",
+        "collect_type", "payment_method", "days_since_first_order",
+    ]].copy()
+    for column in ("order_value", "num_items_ordered"):
+        original = features[column]
+        numeric = pd.to_numeric(original, errors="coerce")
+        invalid = original.notna() & (numeric.isna() | ~np.isfinite(numeric))
+        invalid |= (numeric < 0).fillna(False)
+        if invalid.any():
+            raise ValueError(f"{column} must be cleaned to nonnegative finite values before feature preparation")
+        features[column] = numeric.astype(float)
+    dates = _dates(features.pop("order_date"), "order_date")
     features["order_weekday"] = dates.dt.day_of_week.astype(float)
     features["order_month"] = dates.dt.month.astype(float)
+    for column in CATEGORICAL_FEATURES:
+        features[column] = features[column].astype("string").str.strip()
+    features["country_code"] = features["country_code"].str.upper()
+    features["collect_type"] = features["collect_type"].str.lower()
+    features["payment_method"] = features["payment_method"].str.lower()
+    for column in CATEGORICAL_FEATURES:
+        features[column] = features[column].astype(object).where(features[column].notna(), np.nan)
+    features.index = orders.index
     return features[INPUT_FEATURES]
 
 
 def prepare_training_data(customers, orders, labels, include_test=False,
                           include_training_dates=False, validation_start_date=None):
-    """Join development-only tables and return training and validation data.
+    """Safely join development records and return chronological train/validation data.
 
-    Callers must first use ``load_development_tables`` so sealed test records
-    are excluded before cleaning or joining. This function never constructs,
-    transforms, returns or summarizes test features or labels. Whole dates are
-    kept together. Pass the original validation boundary when reproducing the
-    historical split; otherwise 70% of the supplied development rows are used
-    to choose a chronological train/validation boundary.
+    Sealed test-period orders are rejected before any feature join. This helper
+    never constructs or returns test features or labels. Whole dates stay in one
+    partition. The historical 70% development boundary may be supplied to
+    reproduce the saved validation period.
     """
     _check_keys(customers, CUSTOMER_KEY, "customers")
     _check_keys(orders, ORDER_KEY, "orders")
     _check_keys(labels, ORDER_KEY, "labels")
-    order_dates = pd.to_datetime(orders["order_date"], errors="coerce", format="mixed")
-    if (order_dates >= pd.Timestamp("2023-04-14")).any():
-        raise ValueError("Input includes sealed test-period orders; use the development-only CSV loader")
     if labels[CUSTOMER_KEY].isna().any().any():
         raise ValueError("labels has missing customer keys")
     if "is_fraud" not in labels:
         raise ValueError("labels must contain is_fraud")
 
+    order_dates = _dates(orders["order_date"], "order_date")
+    if (order_dates >= pd.Timestamp("2023-04-14")).any():
+        raise ValueError("Input includes sealed test-period orders; use the development-only CSV loader")
     if include_test:
         raise ValueError("Test data are sealed and cannot be returned by this function")
-    rows = labels.merge(orders, on=ORDER_KEY, how="left", validate="one_to_one", indicator="order_match")
-    rows = rows.merge(customers[CUSTOMER_KEY], on=CUSTOMER_KEY, how="left", validate="many_to_one", indicator="customer_match")
+
+    label_rows = labels.reset_index(drop=True).copy()
+    order_rows = orders.reset_index(drop=True).copy()
+    customer_rows = customers.reset_index(drop=True).copy()
+    rows = label_rows.merge(
+        order_rows, on=ORDER_KEY, how="left", validate="one_to_one", indicator="order_match",
+    )
+    customer_match = rows[CUSTOMER_KEY].merge(
+        customer_rows[CUSTOMER_KEY], on=CUSTOMER_KEY, how="left", validate="many_to_one",
+        indicator=True,
+    )
     unmatched_orders = int((rows["order_match"] == "left_only").sum())
-    unmatched_customers = int((rows["customer_match"] == "left_only").sum())
+    unmatched_customers = int((customer_match["_merge"] == "left_only").sum())
     rows = rows.loc[rows["order_match"] == "both"].copy()
-    dates = pd.to_datetime(rows["order_date"], errors="raise")
-    if not pd.api.types.is_datetime64_any_dtype(dates) or isinstance(dates.dtype, pd.DatetimeTZDtype):
-        raise ValueError("order_date must contain timezone-naive dates")
+    dates = _dates(rows["order_date"], "order_date")
     missing_dates = int(dates.isna().sum())
     rows = rows.loc[dates.notna()].copy()
-    rows["order_date"] = dates.loc[dates.notna()].dt.normalize()
+    rows["order_date"] = dates.loc[dates.notna()]
     if len(rows) < 3:
         raise ValueError("At least three dated matched orders are needed")
+
     sorted_dates = rows["order_date"].sort_values().reset_index(drop=True)
     if validation_start_date is None:
         validation_start = sorted_dates.iloc[int(len(sorted_dates) * 0.70)]
     else:
         validation_start = pd.Timestamp(validation_start_date)
-    train_rows = rows.loc[rows["order_date"] < validation_start]
-    val_rows = rows.loc[rows["order_date"] >= validation_start]
+    train_rows = rows.loc[rows["order_date"] < validation_start].copy()
+    val_rows = rows.loc[rows["order_date"] >= validation_start].copy()
     if train_rows.empty or val_rows.empty:
         raise ValueError("The chronological train/validation split produced an empty set")
     if not train_rows["is_fraud"].isin([0, 1]).all() or not val_rows["is_fraud"].isin([0, 1]).all():
@@ -120,38 +166,45 @@ def prepare_training_data(customers, orders, labels, include_test=False,
     }
     if include_training_dates:
         report["training_dates"] = train_rows["order_date"].copy()
-    result = (prepare_features(train_rows), train_rows["is_fraud"].astype(int),
-              prepare_features(val_rows), val_rows["is_fraud"].astype(int),
-              None, None, report)
+    train_dates = train_rows["order_date"].copy()
+    result = (
+        prepare_features(train_rows, customer_rows), train_rows["is_fraud"].astype(int),
+        prepare_features(val_rows, customer_rows), val_rows["is_fraud"].astype(int),
+        None, None, report,
+    )
     if include_training_dates:
-        result += (train_rows["order_date"].copy(),)
+        result += (train_dates,)
     return result
 
-def fit_preprocessor(train_features):
-    """Fit imputation, scaling and encoding on training features only."""
-    if list(train_features.columns) != INPUT_FEATURES:
-        raise ValueError(f"Expected feature columns in this order: {INPUT_FEATURES}")
+
+def build_preprocessor():
+    """Return the single shared, unfitted PBI 03 transformation pipeline."""
     amounts = Pipeline([
         ("impute", SimpleImputer(strategy="median", keep_empty_features=True)),
         ("log", FunctionTransformer(np.log1p, feature_names_out="one-to-one")),
         ("scale", RobustScaler()),
     ])
-    dates = SimpleImputer(strategy="median", keep_empty_features=True)
+    calendar = SimpleImputer(strategy="median", keep_empty_features=True)
     categories = Pipeline([
         ("impute", SimpleImputer(strategy="constant", fill_value="__missing__", keep_empty_features=True)),
         ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=True)),
     ])
-    preprocessor = ColumnTransformer([
+    return ColumnTransformer([
         ("amounts", amounts, NUMERIC_FEATURES),
-        ("dates", dates, DATE_FEATURES),
+        ("calendar", calendar, DATE_FEATURES),
         ("categories", categories, CATEGORICAL_FEATURES),
     ], sparse_threshold=1.0)
-    preprocessor.fit(train_features)
-    return preprocessor
+
+
+def fit_preprocessor(train_features):
+    """Fit the shared imputer, transforms and encoder on training rows only."""
+    if list(train_features.columns) != INPUT_FEATURES:
+        raise ValueError(f"Expected feature columns in this order: {INPUT_FEATURES}")
+    return build_preprocessor().fit(train_features)
 
 
 def training_sample_weights(y_train):
-    """Return balanced weights computed from training labels only."""
+    """Return balanced sample weights calculated from training labels only."""
     if set(pd.Series(y_train).dropna().unique()) != {0, 1} or pd.isna(y_train).any():
         raise ValueError("Training labels must contain both binary classes")
     return compute_sample_weight(class_weight="balanced", y=y_train)

@@ -96,19 +96,37 @@ val_matrix = preprocessor.transform(x_val)
 weights = training_sample_weights(y_train)  # optional for a compatible estimator
 joblib.dump(preprocessor, "artifacts/pbi03_preprocessor.joblib")  # create artifacts/ first
 
-# Later, clean new orders and apply this same fitted artifact; never refit on them.
-# new_orders = clean_orders(pd.read_csv(
-#     "orders_new.csv",
-#     dtype={"country_code": "string", "order_id": "string"},
-#     keep_default_na=False,
-#     na_values=[""],
-# ))[0]
-# future_matrix = joblib.load("artifacts/pbi03_preprocessor.joblib").transform(prepare_features(new_orders))
+# For inference, add customer_id from a trusted order/customer mapping, not labels.
+# new_orders = clean_orders(read_dataset_csv("orders_new.csv"))[0]
+# new_customers = clean_customers(read_dataset_csv("customers_new.csv"))[0]
+# future_features = prepare_features(new_orders_with_customer_id, new_customers)
+# future_matrix = joblib.load("artifacts/pbi03_preprocessor.joblib").transform(future_features)
 ```
 
 Choose hyperparameters and thresholds using training-only chronological folds; use validation to compare candidates. The sealed test partition was not accessed in this development phase. A future final evaluation requires a separately approved, controlled handoff after the champion and evaluation protocol are frozen.
 
-The base-data fitted artifact is saved locally at `artifacts/pbi03_preprocessor.joblib` and ignored by Git. Keep a trusted copy alongside each eventual model, with matching library versions. Never load a joblib file from an untrusted source. Run all tests with `python -m unittest discover -s tests -v`.
+The exact shared feature schema is `order_value`, `num_items_ordered`, `order_weekday`, `order_month`, `country_code`, `collect_type`, `payment_method`, `days_since_first_order`. Customer history and payment-method normalization are performed only in `src/feature_engineering.py`; PBI 06 and PBI 07 have no separate feature or imputation pipeline. The fitted artifact is saved locally at `artifacts/pbi03_preprocessor.joblib` and ignored by Git. Keep it alongside each model with matching library versions. Never load a joblib file from an untrusted source. Run all tests with `python -m unittest discover -s tests -v`.
+
+The feature `days_since_first_order` is missing when its timestamp is invalid, absent or after the order date. However, the base order CSV does not contain `customer_id`; serving requires a trusted order-to-customer mapping independent of fraud labels. The source also does not prove when `first_order_datetime` is available. These point-in-time checks remain PBI 10 blockers until the data owner confirms them.
+
+### PBI 08 integration for Ephraim
+
+No PBI 08 notebook is present in this branch. Ephraim should call the shared functions rather than implement a member-specific pipeline:
+
+```python
+from src.feature_engineering import INPUT_FEATURES, prepare_training_data, fit_preprocessor
+
+x_train, y_train, x_val, y_val, _, _, split_report, train_dates = prepare_training_data(
+    customers, orders, labels, include_test=False, include_training_dates=True,
+    validation_start_date=VALIDATION_START,
+)
+assert list(x_train.columns) == INPUT_FEATURES
+preprocessor = fit_preprocessor(x_train)
+train_matrix = preprocessor.transform(x_train)
+validation_matrix = preprocessor.transform(x_val)
+```
+
+Fit Ephraim's estimator on `train_matrix` and `y_train`; use the same fitted `preprocessor` for validation and inference. Keep `train_dates` as split/calibration metadata only. If the model requires dense input, convert the transformed matrix without changing the feature values. Use the same latest-20%-of-whole-training-dates threshold calibration policy as PBI 07 for fair comparisons; never select thresholds from outer validation labels.
 
 ## PBI 06 — fixed-model retraining interface
 

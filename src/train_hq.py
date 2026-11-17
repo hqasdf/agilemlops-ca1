@@ -28,6 +28,7 @@ from sklearn.metrics import (accuracy_score, average_precision_score, confusion_
 from threadpoolctl import threadpool_limits
 
 from src.feature_engineering import fit_preprocessor, training_sample_weights
+from src.model_evaluation import best_f1_threshold, recent_training_window
 
 
 def model_candidates(seed=42):
@@ -185,6 +186,104 @@ def train_prepared(x_train, y_train, x_val, y_val, report, preprocessor=None,
             results.append(row)
             print(f"Finished {name}: validation fraud F1 = {metrics['f1']:.4f}", flush=True)
     return rank_results(results), uri
+
+
+def train_shared_feature_comparison(x_train, y_train, train_dates, x_val, y_val,
+                                    report, selected_models, tracking_uri=None,
+                                    member="Han Qian"):
+    """Fit fixed selected configurations with shared 8-feature prep and cutoff rule.
+
+    The newest 20% of whole outer-training dates is reserved for threshold
+    calibration. Each model is fit once on older training rows; that same fitted
+    model produces calibration and validation probabilities. No search or test
+    data are used. ``selected_models`` maps model names to saved params and
+    training-only weight strength from prior PBI 06 evidence.
+    """
+    import pandas as pd
+
+    from src.feature_engineering import INPUT_FEATURES
+
+    if list(x_train.columns) != INPUT_FEATURES or list(x_val.columns) != INPUT_FEATURES:
+        raise ValueError("Shared comparison requires the exact PBI 03 eight-feature schema")
+    if not x_train.index.equals(y_train.index) or not x_train.index.equals(train_dates.index):
+        raise ValueError("Training features, labels and dates must have matching indices")
+    if not x_val.index.equals(y_val.index) or not x_train.index.intersection(x_val.index).empty:
+        raise ValueError("Training and validation rows must have matching, disjoint indices")
+    if list(x_train.columns) != list(x_val.columns):
+        raise ValueError("Training and validation features must have the same order")
+    if not set(selected_models).issubset(model_candidates()):
+        raise ValueError("A saved configuration names an unsupported model")
+
+    calibration_mask = recent_training_window(train_dates, share=0.20)
+    fit_mask = ~calibration_mask
+    fit_y = y_train.loc[fit_mask]
+    calibration_y = y_train.loc[calibration_mask]
+    if set(fit_y.unique()) != {0, 1} or set(calibration_y.unique()) != {0, 1}:
+        raise ValueError("Training and calibration periods must each contain both classes")
+
+    preprocessor = fit_preprocessor(x_train.loc[fit_mask])
+    fit_matrix = preprocessor.transform(x_train.loc[fit_mask]).astype(np.float32)
+    calibration_matrix = preprocessor.transform(x_train.loc[calibration_mask]).astype(np.float32)
+    validation_matrix = preprocessor.transform(x_val).astype(np.float32)
+    uri = _tracking("PBI06_SharedEightFeature", tracking_uri)
+    rows = []
+
+    with threadpool_limits(limits=4):
+        for name, config in selected_models.items():
+            print(f"Training shared eight-feature {name}...", flush=True)
+            model = _seven_model(name, config["params"], seed=42)
+            fit_input = _model_input(name, fit_matrix)
+            calibration_input = _model_input(name, calibration_matrix)
+            validation_input = _model_input(name, validation_matrix)
+            start = perf_counter()
+            _fit_weighted(model, name, fit_input, fit_y, config["weight_strength"])
+            training_seconds = perf_counter() - start
+            calibration_probabilities = model.predict_proba(calibration_input)[:, 1]
+            threshold = best_f1_threshold(calibration_y, calibration_probabilities)
+            calibration_f1 = f1_score(
+                calibration_y, calibration_probabilities >= threshold, zero_division=0
+            )
+            start = perf_counter()
+            probabilities = model.predict_proba(validation_input)[:, 1]
+            prediction_seconds = perf_counter() - start
+            metrics_at_half = validation_metrics(y_val, probabilities, 0.5)
+            metrics = validation_metrics(y_val, probabilities, threshold)
+            run_id = _log_run(
+                name, "shared_eight_feature", model, preprocessor, y_val, probabilities,
+                threshold, metrics, report, training_seconds, prediction_seconds,
+                member, f"training-only balanced weight strength {config['weight_strength']}",
+                extra_params={
+                    "selected_parameters": config["params"],
+                    "selected_config_source": config.get("source_run_id", "saved PBI06 configuration"),
+                    "feature_schema_version": "shared_8_feature_v1",
+                    "threshold_rule": "max fraud F1 on newest 20% of whole training dates",
+                    "calibration_f1": float(calibration_f1),
+                    "calibration_rows": int(calibration_mask.sum()),
+                    "fit_rows": int(fit_mask.sum()),
+                },
+                run_label=f"{member}-{name}-shared-eight-feature",
+                split_description="chronological training/calibration/validation; test untouched",
+            )
+            row = {
+                "model": name, "version": "shared_eight_feature",
+                "threshold": threshold, "calibration_f1": float(calibration_f1),
+                "f1_at_0.5": metrics_at_half["f1"], **metrics,
+                "training_seconds": training_seconds,
+                "prediction_seconds": prediction_seconds,
+                "fit_rows": int(fit_mask.sum()),
+                "calibration_rows": int(calibration_mask.sum()),
+                "selected_parameters": config["params"],
+                "source_run_id": config.get("source_run_id"),
+                "run_id": run_id,
+            }
+            rows.append(row)
+            print(f"Finished {name}: validation fraud F1 = {metrics['f1']:.4f}", flush=True)
+
+    leaderboard = pd.DataFrame(rows).sort_values(
+        ["f1", "average_precision"], ascending=[False, False]
+    ).reset_index(drop=True)
+    return {"results": rows, "leaderboard": leaderboard, "tracking_uri": uri,
+            "calibration_rule": "latest 20% of whole outer-training dates"}
 
 
 def tuning_candidates():
@@ -489,14 +588,8 @@ def load_saved_advanced_results(report, tracking_uri=None):
 
 def select_f1_threshold(y, probabilities):
     """Maximize F1 on training-only predictions; break exact ties upwards."""
-    precision, recall, thresholds = precision_recall_curve(y, probabilities)
-    if len(thresholds) == 0:
-        raise ValueError("Threshold selection needs nonempty predictions")
-    denominator = precision[:-1] + recall[:-1]
-    f1 = np.divide(2 * precision[:-1] * recall[:-1], denominator,
-                   out=np.zeros_like(denominator), where=denominator != 0)
-    best = np.flatnonzero(f1 == f1.max())[-1]
-    return float(thresholds[best]), float(f1[best])
+    threshold = best_f1_threshold(y, probabilities)
+    return threshold, float(f1_score(y, np.asarray(probabilities) >= threshold, zero_division=0))
 
 
 def seven_model_candidates(seed=42):
@@ -563,7 +656,21 @@ def _seven_model(name, params, seed):
     model = model_candidates(seed)[name]
     if name in ("logistic_regression", "random_forest"):
         model.set_params(class_weight=None)
-    return model.set_params(**params)
+    current_params = model.get_params()
+    clean_params = {}
+    for key, value in params.items():
+        current_value = current_params.get(key)
+        if isinstance(value, str) and not isinstance(current_value, str):
+            if value == "None":
+                value = None
+            elif isinstance(current_value, bool):
+                value = value.lower() == "true"
+            elif isinstance(current_value, int):
+                value = int(value)
+            elif isinstance(current_value, float):
+                value = float(value)
+        clean_params[key] = value
+    return model.set_params(**clean_params)
 
 
 def _model_input(name, matrix):

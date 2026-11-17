@@ -94,3 +94,19 @@ Install the bounded PBI 07 runtime dependencies from `requirements-pbi07.txt`. T
 - [ ] Compare with PBI 06 on the identical fit/calibration protocol before making a cross-member champion claim.
 
 Only close PBI 07 after the unchecked evidence items are satisfied.
+
+## Shared eight-feature rerun (additive, 17 November 2026)
+
+The historical results above remain unchanged. The three run IDs in the historical table were not present in the local MLflow database available at the start of this change; their reported metrics remain in this report, but their artifacts could not be checked or reloaded from this checkout. The updated notebook loads only development-eligible rows with `load_development_tables()` and uses the shared PBI 03 feature/preprocessing implementation. It logs a separate `shared-eight-feature` batch. The frozen outer split is the same as PBI 06: training 660,773 rows (12 Nov 2022–14 Mar 2023), validation 144,978 rows (15 Mar–13 Apr 2023). The latest 20% of whole training dates is used for threshold selection; the held-out test data are not returned or evaluated.
+
+| New version | Threshold | F1 | Precision | Recall | AP | ROC-AUC | FP | FN | Fit seconds | Local MLflow run ID |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| v1 shared logistic, fixed | 0.5000 | 0.4782 | 0.3413 | 0.7984 | 0.5082 | 0.8418 | 30,412 | 3,979 | 2.10 | `08048524c3cf4b85a2ad45d032d4dbcc` |
+| v2 shared logistic, calibrated | 0.6476 | 0.5221 | 0.4714 | 0.5850 | 0.5082 | 0.8418 | 12,950 | 8,192 | 0.10 | `39bda182bac844c992e8a4da522f7d07` |
+| v3 shared HistGradientBoosting | 0.7123 | 0.5223 | 0.5288 | 0.5159 | 0.5193 | 0.8475 | 9,075 | 9,556 | 3.50 | `fef5227f0a084e78b22db05cc2c27c97` |
+
+Against the historical PBI 07 validation table, the fixed-threshold logistic F1 changes from 0.4867 to 0.4782 (-0.0085); calibrated logistic changes from 0.5194 to 0.5221 (+0.0027); and HGB changes from 0.5390 to 0.5223 (-0.0167). These are observed differences, not isolated causal effects: the common preprocessing, case normalization and HGB estimator settings changed together. The threshold increases logistic F1 and sharply reduces false positives but catches fewer fraud orders. The new HGB has a slightly higher F1 than calibrated logistic (0.5223 vs 0.5221), but lower recall (0.5159 vs 0.5850). Its AP is 0.5193 compared with logistic 0.5082. The choice depends on costs and review capacity.
+
+The prior HGB native categorical and monotonic constraints were removed to use the common one-hot representation. This changes model behavior and is a new model version, not a like-for-like repeat. The first-order timestamp's point-in-time provenance and an independent order-to-customer mapping remain production blockers. PBI 08 has not been integrated because Ephraim's notebook is not present in this local checkout.
+
+During verification, the notebook was first run with the split helper's row-quantile default, which began validation on 25 February instead of the frozen 15 March boundary. Those three preliminary `shared-eight-feature` runs remain in the local experiment store with their split dates and metrics intact; they are superseded and must not be used for team comparison. After detecting this, `prepare_data()` was corrected to pass the shared `VALIDATION_START`, and the three run IDs listed in the table above were produced on the aligned dates. No existing runs were deleted or edited.

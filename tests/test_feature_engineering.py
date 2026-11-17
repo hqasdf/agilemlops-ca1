@@ -34,6 +34,10 @@ class FeatureTests(unittest.TestCase):
         )
         self.assertEqual(report["labels_without_orders"], 1)
         self.assertEqual((len(x_train), len(x_val)), (14, 6))
+        self.assertEqual(INPUT_FEATURES, [
+            "order_value", "num_items_ordered", "order_weekday", "order_month",
+            "country_code", "collect_type", "payment_method", "days_since_first_order",
+        ])
         self.assertIsNone(x_test)
         self.assertIsNone(y_test)
         self.assertLess(report["train_last_date"], report["validation_first_date"])
@@ -108,11 +112,25 @@ class FeatureTests(unittest.TestCase):
         missing_dates.loc[0, "order_date"] = pd.NaT
         *_, report = prepare_training_data(self.customers, missing_dates, self.labels)
         self.assertEqual(report["matched_orders_without_dates"], 1)
-        self.assertTrue(np.isnan(prepare_features(missing_dates).iloc[0]["order_weekday"]))
-        invalid = self.orders.copy()
+        order_customer = self.orders.merge(
+            self.labels[["country_code", "order_id", "customer_id"]],
+            on=["country_code", "order_id"], validate="one_to_one",
+        )
+        order_customer.loc[0, "order_date"] = pd.NaT
+        self.assertTrue(np.isnan(prepare_features(order_customer, self.customers).iloc[0]["order_weekday"]))
+        future_customers = self.customers.copy()
+        future_customers.loc[0, "first_order_datetime"] = pd.Timestamp("2024-01-01")
+        safe_features = prepare_features(order_customer.iloc[[1]], future_customers)
+        self.assertTrue(pd.isna(safe_features.iloc[0]["days_since_first_order"]))
+        self.assertEqual(safe_features.loc[safe_features.index[0], "payment_method"], "cash")
+        invalid = order_customer.copy()
         invalid.loc[0, "order_value"] = -1
         with self.assertRaisesRegex(ValueError, "nonnegative"):
-            prepare_features(invalid)
+            prepare_features(invalid, self.customers)
+
+    def test_customer_identity_is_required_for_order_feature_join(self):
+        with self.assertRaisesRegex(ValueError, "customer_id"):
+            prepare_features(self.orders.iloc[[0]], self.customers)
         same_date = self.orders.copy()
         same_date["order_date"] = pd.Timestamp("2023-01-01")
         with self.assertRaisesRegex(ValueError, "empty set"):
