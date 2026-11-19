@@ -344,6 +344,17 @@ class TrainingTests(unittest.TestCase):
                      patch("src.train_hq.optimize_advanced_thresholds", side_effect=AssertionError("unexpected search")):
                     results = train_selected_models(x_train, y_train, x_val, y_val, report,
                                                    tracking_uri=uri, experiment_name="test_selected", batch_name="test-batch")
+                with patch("src.train_hq.fit_preprocessor", side_effect=training_only), \
+                     patch("src.pbi06_research.sample_configs", side_effect=AssertionError("unexpected search")), \
+                     patch("src.pbi06_research.best_f1_threshold", side_effect=AssertionError("unexpected calibration")):
+                    fixed = train_selected_models(
+                        x_train, y_train, x_val, y_val, report, tracking_uri=uri,
+                        experiment_name="test_selected", batch_name="approved-policy",
+                        configurations={"xgboost": {"params": {"n_estimators": 2}, "weight": .6, "threshold": .33}})
+                self.assertEqual((fixed[0]["model"], fixed[0]["threshold"]), ("xgboost", .33))
+                inference = mlflow.artifacts.download_artifacts(
+                    run_id=fixed[0]["run_id"], artifact_path="model/inference.json")
+                self.assertEqual(json.loads(Path(inference).read_text())["threshold"], .33)
                 self.assertEqual({r["model"] for r in results}, {"catboost", "lightgbm"})
                 expected = {"catboost": 0.45684071728727366, "lightgbm": 0.5}
                 for result in results:
@@ -474,6 +485,118 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(result["calibration_f1"], changed_result["calibration_f1"])
         self.assertEqual(result["fit_rows"] + result["calibration_rows"], len(x_train))
         self.assertEqual(result["run_id"], "new-eight-feature-run")
+
+
+
+class RebuiltResearchTests(unittest.TestCase):
+    def test_sampled_spaces_are_reproducible_distinct_and_compatible(self):
+        from src.pbi06_research import ORDINARY, _estimator, _key, sample_configs
+
+        for family in ORDINARY:
+            baseline = {"params": {}, "weight": 1.0}
+            ordinary = sample_configs(family, "ordinary", baseline, 10)
+            advanced = sample_configs(family, "advanced", ordinary[-1], 24)
+            self.assertEqual(ordinary[0], baseline)
+            self.assertEqual(advanced[0], ordinary[-1])
+            self.assertEqual(advanced, sample_configs(family, "advanced", ordinary[-1], 24))
+            self.assertEqual(len({_key(c) for c in ordinary}), 10)
+            self.assertEqual(len({_key(c) for c in advanced}), 24)
+            for config in [*ordinary, *advanced]:
+                params = _estimator(family, config).get_params()
+                self.assertIsNone(params.get("class_weight"))
+                self.assertIn(params.get("scale_pos_weight"), (None, 1))
+                if family == "catboost":
+                    self.assertFalse("bagging_temperature" in params and "subsample" in params)
+                if family == "random_forest" and not params["bootstrap"]:
+                    self.assertIsNone(params["max_samples"])
+                if family == "lightgbm" and params["subsample"] < 1:
+                    self.assertGreater(params["subsample_freq"], 0)
+
+    def test_failed_fold_is_logged_and_excluded_from_selection(self):
+        from src import pbi06_research as research
+
+        prior_uri = mlflow.get_tracking_uri()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                uri = f"sqlite:///{tmp}/failed.sqlite"
+                mlflow.set_tracking_uri(uri)
+                experiment = mlflow.create_experiment("failure", artifact_location=Path(tmp, "artifacts").as_uri())
+                period = {"first": "2023-01-01", "last": "2023-01-02", "rows": 2}
+                fold = (None, None, None, None, period, period)
+                config = {"params": {"C": -1}, "weight": 1.0}
+                with mlflow.start_run(experiment_id=experiment) as parent, \
+                     patch.object(research, "_fit", side_effect=ValueError("invalid C")):
+                    row = research._trial("logistic_regression", "advanced", 1, config, [fold],
+                                          parent.info.run_id, "synthetic")
+                self.assertEqual(row["status"], "failed")
+                self.assertIn("invalid C", row["folds"][0]["reason"])
+                client = mlflow.MlflowClient(tracking_uri=uri)
+                run_id = row["folds"][0]["run_id"]
+                self.assertEqual(client.get_run(run_id).data.tags["trial_status"], "failed")
+                self.assertTrue(Path(client.download_artifacts(run_id, "failure.txt")).is_file())
+                with self.assertRaisesRegex(RuntimeError, "No successful"):
+                    research._winner([row])
+        finally:
+            mlflow.set_tracking_uri(prior_uri)
+
+    def test_all_stages_ignore_outer_labels_for_selection_and_block_sealed_rows(self):
+        from src import pbi06_research as research
+        from src.feature_engineering import INPUT_FEATURES
+
+        dates = pd.Series(pd.date_range("2023-01-01", periods=75).repeat(4))
+        dates_train = dates[dates < "2023-03-15"]
+        dates_val = dates[dates >= "2023-03-15"]
+        x = pd.DataFrame({
+            "order_value": np.arange(len(dates)) % 13,
+            "num_items_ordered": np.ones(len(dates)),
+            "order_weekday": dates.dt.dayofweek,
+            "order_month": dates.dt.month,
+            "country_code": ["SG", "MY"] * (len(dates) // 2),
+            "collect_type": "delivery",
+            "payment_method": "card",
+            "days_since_first_order": np.arange(len(dates)) % 40,
+        })[INPUT_FEATURES]
+        y = pd.Series(np.arange(len(dates)) % 2)
+        x_train, x_val = x.loc[dates_train.index], x.loc[dates_val.index]
+        y_train, y_val = y.loc[dates_train.index], y.loc[dates_val.index]
+        report = {"train_first_date": "2023-01-01", "train_last_date": "2023-03-14",
+                  "validation_first_date": "2023-03-15", "validation_last_date": "2023-03-16",
+                  "training_rows": len(x_train), "validation_rows": len(x_val)}
+        sealed = dates_val.copy()
+        sealed.iloc[-1] = pd.Timestamp("2023-04-14")
+        with self.assertRaisesRegex(ValueError, "Sealed"):
+            next(research.research_stages(x_train, y_train, dates_train, x_val, y_val, sealed, report))
+        with tempfile.TemporaryDirectory() as tmp:
+            uri = f"sqlite:///{tmp}/mlflow.sqlite"
+            mlflow.set_tracking_uri(uri)
+            mlflow.create_experiment(research.EXPERIMENT, artifact_location=Path(tmp, "artifacts").as_uri())
+            fit_indices = []
+            def fit_only(frame):
+                fit_indices.append(frame.index)
+                return fit_preprocessor(frame)
+            with patch.object(research, "BUDGETS", (2, 2)), patch.object(research, "LOCAL_URI", uri), \
+                 patch.object(research, "fit_preprocessor", side_effect=fit_only):
+                def run(labels, mode="full", run_id=None):
+                    return list(research.research_stages(
+                        x_train, y_train, dates_train, x_val, labels, dates_val, report,
+                        mode=mode, run_id=run_id))
+                first = run(y_val)
+                other = run(1 - y_val)
+                evidence, scores = first[-1]
+                replay, _ = run(y_val, "reuse", evidence["run_id"])[-1]
+                self.assertEqual(evidence, replay)
+                with self.assertRaisesRegex(RuntimeError, "compatible verified"):
+                    run(1 - y_val, "reuse", evidence["run_id"])
+            self.assertTrue(all(idx.isin(dates_train[~research.recent_training_window(dates_train)].index).all()
+                                for idx in fit_indices))
+            for stage in first[:4]:
+                self.assertEqual({row["family"] for row in stage}, set(research.ORDINARY))
+            def policy(payload):
+                return {row["family"]: (row["config"], row["threshold"]) for row in payload["final"]}
+            self.assertEqual(policy(evidence), policy(other[-1][0]))
+            self.assertTrue(any(row["f1"] != next(r["f1"] for r in other[-1][0]["final"]
+                                                  if r["family"] == row["family"]) for row in evidence["final"]))
+            self.assertEqual(len([key for key in scores if key.startswith("final_")]), 7)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,66 @@
+# PBI 06 — Seven-family model comparison
+
+The rebuilt workflow evaluated all seven model families on the frozen chronological development split. Local MLflow parent run `939506bd3eb6434c8489d5871ea9778e` in `PBI06_SevenFamily_Rebuild`.
+
+## Ranked validation leaderboard
+
+| Family | Baseline F1 | Ordinary F1 | Advanced F1 | Selected | F1 at 0.5 | Threshold | Optimized F1 | Precision | Recall | AP | ROC-AUC | TN | FP | FN | TP | Fit s | Predict s | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| RandomForestClassifier | 0.540459 | 0.543441 | 0.546150 | advanced | 0.546150 | 0.510997 | 0.543502 | 0.491539 | 0.607751 | 0.523255 | 0.851193 | 112,828 | 12,410 | 7,743 | 11,997 | 8.457462 | 0.113309 | `adc11d5eedb54dc9a3086cad7e6c4270` |
+| XGBClassifier | 0.543524 | 0.544585 | 0.543889 | advanced | 0.543889 | 0.547957 | 0.528035 | 0.521436 | 0.534802 | 0.523368 | 0.848380 | 115,549 | 9,689 | 9,183 | 10,557 | 0.786290 | 0.027484 | `289945f86f2449ea8fe7ff2421249eaa` |
+| GradientBoostingClassifier | 0.532694 | 0.525190 | 0.537374 | advanced | 0.537374 | 0.528222 | 0.526210 | 0.511904 | 0.541337 | 0.523780 | 0.847646 | 115,049 | 10,189 | 9,054 | 10,686 | 17.316130 | 0.082492 | `5e4b1bd4257f4e98920647519f59550c` |
+| LGBMClassifier | 0.540652 | 0.545418 | 0.545418 | ordinary | 0.545418 | 0.580598 | 0.522158 | 0.528457 | 0.516008 | 0.521865 | 0.847562 | 116,149 | 9,089 | 9,554 | 10,186 | 0.803293 | 0.130568 | `8fd15510396444e29e0308f423fe97df` |
+| CatBoostClassifier | 0.538475 | 0.546434 | 0.546434 | ordinary | 0.546434 | 0.576291 | 0.520806 | 0.533043 | 0.509119 | 0.524951 | 0.850076 | 116,434 | 8,804 | 9,690 | 10,050 | 3.006833 | 0.007761 | `652ffc4da1894319aa859515e14c2fce` |
+| LogisticRegression | 0.477997 | 0.517770 | 0.517770 | ordinary | 0.517770 | 0.489344 | 0.520114 | 0.472318 | 0.578673 | 0.507008 | 0.840845 | 112,476 | 12,762 | 8,317 | 11,423 | 1.713572 | 0.001077 | `2a91d0ecab36428989a0efecc96c80e6` |
+| HistGradientBoostingClassifier | 0.539990 | 0.537184 | 0.537184 | ordinary | 0.537184 | 0.545706 | 0.517620 | 0.526572 | 0.508967 | 0.515904 | 0.848068 | 116,205 | 9,033 | 9,693 | 10,047 | 1.890102 | 0.082498 | `bec883e5805e4614aaabe32dc0db1f15` |
+
+## Training-selected configurations
+
+| Family | Selected stage | Parameters / weight | Mean inner F1 | Std F1 | Mean inner AP | Highest observed F1 stage on validation |
+| --- | --- | --- | --- | --- | --- | --- |
+| LogisticRegression | ordinary | `{"C": 20, "max_iter": 200}` / weight 0.6 | 0.405487 | 0.020625 | 0.374099 | ordinary |
+| RandomForestClassifier | advanced | `{"bootstrap": true, "criterion": "entropy", "max_depth": 19, "max_features": "sqrt", "max_samples": 0.55, "min_samples_leaf": 15, "min_samples_split": 160, "n_estimators": 55}` / weight 0.6 | 0.450711 | 0.011909 | 0.431987 | advanced |
+| XGBClassifier | advanced | `{"colsample_bytree": 0.85, "gamma": 1, "learning_rate": 0.07, "max_bin": 256, "max_depth": 5, "min_child_weight": 1, "n_estimators": 110, "reg_alpha": 3, "reg_lambda": 4, "subsample": 0.65}` / weight 0.6 | 0.450620 | 0.012722 | 0.440680 | ordinary |
+| LGBMClassifier | ordinary | `{"learning_rate": 0.07, "n_estimators": 120, "num_leaves": 40}` / weight 0.6 | 0.448232 | 0.014751 | 0.442298 | ordinary |
+| CatBoostClassifier | ordinary | `{"depth": 7, "iterations": 155, "learning_rate": 0.08}` / weight 0.6 | 0.448758 | 0.012091 | 0.440850 | ordinary |
+| HistGradientBoostingClassifier | ordinary | `{"learning_rate": 0.04, "max_iter": 70, "max_leaf_nodes": 24}` / weight 0.6 | 0.449409 | 0.015719 | 0.430314 | baseline |
+| GradientBoostingClassifier | advanced | `{"learning_rate": 0.075, "loss": "log_loss", "max_depth": 3, "max_features": 0.4, "min_samples_leaf": 45, "min_samples_split": 90, "n_estimators": 110, "subsample": 1.0}` / weight 0.6 | 0.443597 | 0.016140 | 0.425411 | advanced |
+
+## Threshold effects on validation
+
+| Family | F1 at 0.5 | Optimized F1 | F1 change | FP at 0.5 | FP optimized | FN at 0.5 | FN optimized | Calibration F1 at 0.5 | Calibration F1 optimized |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| RandomForestClassifier | 0.546150 | 0.543502 | -0.002647 | 12,968 | 12,410 | 7,453 | 7,743 | 0.447635 | 0.449287 |
+| XGBClassifier | 0.543889 | 0.528035 | -0.015854 | 12,550 | 9,689 | 7,679 | 9,183 | 0.446089 | 0.449784 |
+| GradientBoostingClassifier | 0.537374 | 0.526210 | -0.011164 | 12,791 | 10,189 | 7,788 | 9,054 | 0.441153 | 0.446861 |
+| LGBMClassifier | 0.545418 | 0.522158 | -0.023260 | 12,919 | 9,089 | 7,494 | 9,554 | 0.446799 | 0.450477 |
+| CatBoostClassifier | 0.546434 | 0.520806 | -0.025628 | 13,176 | 8,804 | 7,366 | 9,690 | 0.446149 | 0.448648 |
+| LogisticRegression | 0.517770 | 0.520114 | 0.002344 | 11,936 | 12,762 | 8,675 | 8,317 | 0.426202 | 0.427372 |
+| HistGradientBoostingClassifier | 0.537184 | 0.517620 | -0.019564 | 12,145 | 9,033 | 8,031 | 9,693 | 0.443122 | 0.446246 |
+
+## Interpretation
+
+- Highest optimized validation F1 was **RandomForestClassifier**, 0.543502.
+- Highest validation AP was **CatBoostClassifier**, 0.524951.
+- Highest recall was **RandomForestClassifier**, 0.607751.
+- Highest precision was **CatBoostClassifier**, 0.533043.
+- Lowest FPR was **CatBoostClassifier**, 0.070298.
+- Fastest fit was **XGBClassifier**, 0.786290.
+- Best improvement over baseline was **LogisticRegression**, +0.042117 F1.
+- Highest comparable training-fold F1 was **RandomForestClassifier**, 0.450711.
+- Highest observed F1 across the displayed stages was **CatBoostClassifier**, 0.546434 at cutoff 0.500000 (ordinary).
+
+Cutoff calibration reduced outer-validation F1 for RandomForestClassifier, XGBClassifier, GradientBoostingClassifier, LGBMClassifier, CatBoostClassifier, HistGradientBoostingClassifier.
+
+The top optimized model would flag 24,407 of 144,978 validation orders, of which 12,410 were legitimate. It missed 7,743 fraud orders. Review staffing and the cost of missing fraud should inform the PBI 09 comparison.
+
+The earlier XGBoost F1 was **0.5561** at threshold 0.5. The rebuilt training-selected XGBoost reached **0.543889** at 0.5 and **0.528035** at the training-selected cutoff. Both studies used eight features, the frozen outer validation dates, the same 525,226 fitting rows and the same 135,547 calibration rows. The earlier study used fixed parameters inherited from seven-feature evidence and sparse XGBoost inputs. Its 0.5561 was the fixed-cutoff result before calibration. This rebuild selects among eight-feature trials using folds entirely before calibration and supplies dense inputs so encoded zeros keep their numeric meaning. The observed difference spans these changes.
+
+Full model metrics, exact search spaces and evidence are in [the implementation report](PBI06_training_rebuild_report.md).
+
+<details>
+<summary>Historical PBI 06 evidence before the rebuild</summary>
+
 # PBI 06 — Six-model baseline comparison
 
 The six baseline models in `CA1.ipynb` use the same cleaned records, chronological 70/15/15 split and preprocessor fitted on training only. Training has **660,773 rows** (12 November 2022–14 March 2023); validation has **144,978 rows** (15 March–13 April 2023). The held-out test partition is not passed to the models or preprocessor and no test metrics are calculated. All baseline classification thresholds are **0.5**; the separate training-only tuning phase below also keeps that threshold fixed.
@@ -220,3 +283,5 @@ At fixed 0.5, F1 increased by 0.0432, 0.0427 and 0.0472 respectively relative to
 The current HGB version receives shared one-hot encoded inputs. Its prior native categorical handling and monotonic constraint were removed because the shared transformed layout does not retain a safe mapping of original-feature constraints to encoded columns. This changes the estimator's inductive bias; the measured result above is a new version and must not be compared as though only the eighth feature changed.
 
 The new results are stored additively with model and preprocessor artifacts, inference threshold metadata, parameters, validation metrics, and confusion/precision-recall figures. The ordinary notebook does not run tuning searches. The first-order timestamp's provenance and the order-to-customer key needed at inference remain unresolved; see the PBI 03 report.
+
+</details>

@@ -1286,13 +1286,17 @@ SELECTED_MODELS = {
 
 
 def train_selected_models(x_train, y_train, x_val, y_val, split_report, tracking_uri=None,
-                          experiment_name="PBI06_HQ", member="Han Qian", batch_name="retrain"):
+                          experiment_name="PBI06_HQ", member="Han Qian", batch_name="retrain",
+                          *, configurations=None):
     """Refit fixed CatBoost and LightGBM on prepared training data; never search.
 
     Inputs are unencoded PBI 03 feature frames and binary label Series. The
     report must describe their chronological split. Returns per-model metrics,
     MLflow run IDs and model/preprocessor/inference artifact references.
-    No test data or historical model artifact is required.
+    No test data or historical model artifact is required. Pass approved
+    rebuilt configurations as {family: {"params": ..., "weight": ...,
+    "threshold": ...}}. Their thresholds are applied as fixed policy values.
+    Refit scores can drift, so evaluate the fixed policy on supplied validation.
     """
     from src.feature_engineering import INPUT_FEATURES
 
@@ -1313,21 +1317,33 @@ def train_selected_models(x_train, y_train, x_val, y_val, split_report, tracking
     train = preprocessor.transform(x_train).astype(np.float32)
     val = preprocessor.transform(x_val).astype(np.float32)
     results = []
+    selected = SELECTED_MODELS if configurations is None else configurations
+    if not selected or not set(selected).issubset(model_candidates()):
+        raise ValueError("Supply known fixed model configurations")
     with threadpool_limits(limits=4):
-        for name, config in SELECTED_MODELS.items():
-            model = model_candidates()[name].set_params(**config["params"])
-            train_input = train.toarray() if name == "catboost" and hasattr(train, "toarray") else train
-            val_input = val.toarray() if name == "catboost" and hasattr(val, "toarray") else val
-            start = perf_counter()
-            _fit_weighted(model, name, train_input, y_train, config["weight_strength"])
-            training_seconds = perf_counter() - start
+        for name, config in selected.items():
+            if configurations is not None:
+                from src.pbi06_research import _fit, _matrix
+                if not 0 <= config["threshold"] <= 1 or not 0 <= config["weight"] <= 1:
+                    raise ValueError("Fixed threshold and weight must be between zero and one")
+                model, training_seconds = _fit(name, config, train, y_train)
+                val_input = _matrix(name, val)
+                weight_strength = config["weight"]
+            else:
+                model = model_candidates()[name].set_params(**config["params"])
+                train_input = train.toarray() if name == "catboost" and hasattr(train, "toarray") else train
+                val_input = val.toarray() if name == "catboost" and hasattr(val, "toarray") else val
+                start = perf_counter()
+                _fit_weighted(model, name, train_input, y_train, config["weight_strength"])
+                training_seconds = perf_counter() - start
+                weight_strength = config["weight_strength"]
             start = perf_counter()
             probabilities = model.predict_proba(val_input)[:, 1]
             prediction_seconds = perf_counter() - start
             metrics = validation_metrics(y_val, probabilities, config["threshold"])
             run_id = _log_run(name, "selected_retrain", model, preprocessor, y_val, probabilities,
                               config["threshold"], metrics, split_report, training_seconds,
-                              prediction_seconds, member, f"training-only balanced weight strength {config['weight_strength']}",
+                              prediction_seconds, member, f"training-only balanced weight strength {weight_strength}",
                               extra_params={"batch_name": batch_name, "selection": "fixed PBI 06 configuration; no search"},
                               run_label=f"{member}-{batch_name}-{name}-selected_retrain",
                               split_description="chronological training/validation; test not supplied")
@@ -1339,3 +1355,7 @@ def train_selected_models(x_train, y_train, x_val, y_val, split_report, tracking
                             "preprocessor_uri": base_uri + "/model/preprocessor.joblib",
                             "inference_uri": base_uri + "/model/inference.json"})
     return results
+
+
+# The notebook and programmatic research callers share the same staged workflow.
+from src.pbi06_research import evaluation_dates, research_stages, threshold_curve

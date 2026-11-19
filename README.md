@@ -31,10 +31,17 @@ To run tests and execute the notebook from a fresh kernel:
 
 ```bash
 python -m unittest discover -s tests -v
-jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.kernel_name=ca1-project --ExecutePreprocessor.timeout=1200 "ca1 hq file.ipynb"
+jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.kernel_name=python3 --ExecutePreprocessor.timeout=14400 "ca1 hq file.ipynb"
 ```
 
-Ordinary notebook Run All loads the original 15 PBI 06 versions plus the latest complete seven-model experiment from local MLflow; it does not rerun hyperparameter or threshold searches. Keep `artifacts/mlflow/` and `artifacts/sealed_holdout_order_keys.sha256` intact. The seven-model experiment includes three configurations per family and two chronological inner folds (42 candidate fits total); it took about 7.5 minutes locally. To rerun it manually, set `RUN_FINAL_SEVEN_MODEL_SEARCH = True` in the PBI 06 section. `src.train_hq.run_seven_model_experiments()` accepts only training and validation feature frames, labels and training dates, and never accepts test data. To view local runs, open a second terminal in the project folder:
+Ordinary Run All uses the newest complete PBI 06 research evidence that matches the input data, split, feature schema, installed packages and source fingerprint. Set `PBI06_RUN_ID` to require a specific compatible run. If no compatible run exists, run the full research workflow from the project root:
+
+```bash
+source .venv/bin/activate
+PBI06_MODE=full jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.kernel_name=python3 --ExecutePreprocessor.timeout=14400 "ca1 hq file.ipynb"
+```
+
+Full mode runs seven baselines, ten ordinary and 24 advanced configurations per family, then calibrates the selected models on reserved training dates. The results go to the local `PBI06_SevenFamily_Rebuild` experiment. Run All defaults to `reuse` when a new kernel starts without `PBI06_MODE`. Keep `artifacts/mlflow/` and `artifacts/sealed_holdout_order_keys.sha256` together with the development environment. To view the evidence locally, launch MLflow from the project directory:
 
 ```bash
 source .venv/bin/activate
@@ -150,4 +157,4 @@ for result in results:
 
 If `tracking_uri` and `MLFLOW_TRACKING_URI` are unset, runs are local under `artifacts/mlflow/`. Configure the shared URI and any credentials outside the repository; connectivity and artifact storage on AWS have **not** been verified. `split_report` is a caller-supplied contract: use PBI 03 to ensure the dates and rows actually correspond. Applying saved thresholds to a new batch does not guarantee the same accuracy; monitor drift and assess on a properly separated validation period. The user's historical EDA examined full-data labels before the holdout existed.
 
-The historical 15-version comparison in `ca1 hq file.ipynb` loads the original local runs and does not perform tuning or threshold searches on Run All. If the local MLflow database or its artifacts are missing, restore `artifacts/mlflow/` from backup; the notebook deliberately fails rather than inventing results. This interface is not the full PBI 10 ETL pipeline.
+To retrain a specific rebuilt configuration, pass `configurations={family: {"params": parameters, "weight": strength, "threshold": cutoff}}` using the approved policy values from the research report or the final MLflow run's `model/inference.json`. Omit this keyword to keep the original fixed CatBoost and LightGBM behavior. A fresh refit can shift probability scores, so the callable reports validation metrics at the supplied cutoff. The PBI 10 team pipeline and its three-minute runtime remain to be verified.
