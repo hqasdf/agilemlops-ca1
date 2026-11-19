@@ -193,12 +193,7 @@ def _save_model(model, path):
             model = copy(model)
             model._sample_weight = None
         joblib.dump(model, file, compress=3)
-        if mlflow.get_tracking_uri().lower().startswith(("http://", "https://")):
-            from src.pbi06_publish import log_shared_artifact
-            client = mlflow.MlflowClient(tracking_uri=mlflow.get_tracking_uri())
-            log_shared_artifact(client, mlflow.active_run().info.run_id, f"{path}/model.joblib", file, tmp)
-        else:
-            mlflow.log_artifact(str(file), path)
+        mlflow.log_artifact(str(file), path)
 
 
 def _save_preprocessor(preprocessor, path):
@@ -300,10 +295,6 @@ def _prepared_folds(x, y, dates, start_log):
 
 def _paths(client, run_id, directory):
     names = ("model.joblib", "preprocessor.joblib", "inference.json")
-    if client.tracking_uri.lower().startswith(("http://", "https://")):
-        from src.pbi06_publish import download_published_artifact
-        return {name: download_published_artifact(client, run_id, f"model/{name}", directory)
-                for name in names}
     return {name: client.download_artifacts(run_id, f"model/{name}") for name in names}
 
 

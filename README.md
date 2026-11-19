@@ -159,45 +159,10 @@ If `tracking_uri` and `MLFLOW_TRACKING_URI` are unset, runs are local under `art
 
 To retrain a specific rebuilt configuration, pass `configurations={family: {"params": parameters, "weight": strength, "threshold": cutoff}}` using the approved policy values from the research report or the final MLflow run's `model/inference.json`. Omit this keyword to keep the original fixed CatBoost and LightGBM behavior. A fresh refit can shift probability scores, so the callable reports validation metrics at the supplied cutoff. The PBI 10 team pipeline and its three-minute runtime remain to be verified.
 
-### Shared MLflow publication for the completed PBI 06 rebuild
+### Direct MLflow logging for PBI 06
 
-From the project root, configure your shared tracking destination before opening Jupyter or calling a training entry point.
+Open `ca1 hq file.ipynb` with the project kernel. The connection cell defaults to the shared AWS endpoint and honors an existing `MLFLOW_TRACKING_URI`. The default mode reuses local research. Set the final logging cell's AWS condition to true or set `PBI06_LOG_AWS=1` before starting the kernel to log the completed versions to `PBI06_HanQian`. Explicit full research keeps intermediate runs in local SQLite.
 
-```bash
-source .venv/bin/activate
-export MLFLOW_TRACKING_URI=http://mlflow-aws-eb.eba-9bnrxizu.us-east-1.elasticbeanstalk.com
-python -m src.pbi06_publish
-jupyter lab "ca1 hq file.ipynb"
-```
+The notebook logs one top-level MLflow run for each of the 28 versions and checks the original source run ID before writing. Each run includes standard metrics, effective estimator parameters, figures, and an MLflow Python model containing the fitted preprocessor, estimator and cutoff. Load a verified model with `mlflow.pyfunc.load_model("runs:/<shared-run-id>/model")`. Its input is the shared eight-feature frame and its output contains fraud probabilities and classes. The notebook does not send individual predictions or retained Random Forest sample weights.
 
-The publication command resumes the approved 491-run tree by its source run IDs. Run it from one machine at a time. It verifies copied metrics and files and records a local receipt under `artifacts/pbi06_publish/`. Ordinary Run All reads the saved modelling evidence and queries the shared publication status. The configured remote is used for future writes, and a remote connection error is surfaced to the caller. The local fallback applies when no destination is configured.
-
-The approved historical notebook evidence still uses local SQLite and its original fingerprint. For later runs logged directly to shared MLflow, set `PBI06_EVIDENCE_URI` to that tracking URI and keep the corresponding local private predictions under `artifacts/pbi06_private/`. The shared publication excludes the historical `predictions.npz` and removes per-row sample weights from the exported Random Forest copies.
-
-The AWS proxy can reject large artifacts with HTTP 413. The publisher stores those files as verified parts beneath `<artifact>.parts/`. To retrieve either a standard or split model artifact, use the same downloader used by verification:
-
-```python
-from pathlib import Path
-import os
-from mlflow import MlflowClient
-from src.pbi06_publish import download_published_artifact
-
-folder = Path("artifacts/downloaded_models")
-folder.mkdir(parents=True, exist_ok=True)
-client = MlflowClient(tracking_uri=os.environ["MLFLOW_TRACKING_URI"])
-model_path = download_published_artifact(client, shared_run_id, "model/model.joblib", folder)
-```
-
-The publisher records the shared experiment and parent IDs under `artifacts/pbi06_publish/destination.json`. If the endpoint comes back with a different or empty tracking store, the command stops before creating replacement runs. Resume after the original experiment and its parent are available at the configured endpoint.
-
-If the original AWS store returns, run `python -m src.pbi06_publish --rename-original` to verify its experiment ID and parent before renaming it in place. Then run the normal publisher to finish verification.
-
-If the original store is gone, confirm the replacement endpoint and its tracking and artifact persistence with the team first. After explicit approval and a successful synthetic tracking and artifact probe, run:
-
-```bash
-python -m src.pbi06_publish --recover-replacement \
-    --readiness-file artifacts/pbi06_publish/readiness.json \
-    --workers 4 --batch-size 24
-```
-
-The readiness JSON contains the finished probe's `run_id` and the SHA-256 of its `readiness.txt` artifact. The probe in Default uses parameter `scope=synthetic` and metric `probe=1`. The publisher checks the probe again before creating the experiment, uploads and loads all seven final models first, and checks that previously verified runs remain available between batches. A failed check stops further batches. After a successful first publication, use the normal command to resume on the recorded backend.
+Older batch-publication evidence remains in the local MLflow store and publication report. The notebook now uses direct MLflow logging. If the AWS proxy rejects a saved model with HTTP 413 even after lossless compression, the run records the rejected payload and requires an increase to the server's request body limit before it can be completed.

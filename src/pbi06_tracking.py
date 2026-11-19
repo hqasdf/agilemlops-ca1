@@ -17,7 +17,7 @@ OLD_SOURCES = {
     "pbi06_research.py": "581dec8338d6d8119bfe3b6818aee8f971d5ebfffc9526c478e7245acfb58306",
     "train_hq.py": "12abe4239c00532f23a1a4cc7fa1192c4b83d312a1e0bc8b564235436696ab19",
 }
-TRACKING_PATCH_SOURCES = {'pbi06_research.py': '92d686a3fbef9982115a562fe984a242898280d8f0e3f5d65e068cd8e17e3c37', 'train_hq.py': '1bf58fe0f11b5ca46958976f40ea0330119ea2e7769f13cefcc867c8f0eb5277'}
+TRACKING_PATCH_SOURCES = {'pbi06_research.py': 'e3fd43ce561974208ea49d58211fec86f91de60aa17a5c612ef793cd3408444f', 'train_hq.py': '1bf58fe0f11b5ca46958976f40ea0330119ea2e7769f13cefcc867c8f0eb5277'}
 
 
 def resolve_tracking_uri(uri=None):
