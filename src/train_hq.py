@@ -29,6 +29,7 @@ from threadpoolctl import threadpool_limits
 
 from src.feature_engineering import fit_preprocessor, training_sample_weights
 from src.model_evaluation import best_f1_threshold, recent_training_window
+from src.pbi06_tracking import EXPERIMENT, LEGACY_EXPERIMENT, LOCAL_URI, evidence_client, resolve_tracking_uri
 
 
 def model_candidates(seed=42):
@@ -73,16 +74,16 @@ def rank_results(results):
 
 
 def _tracking(experiment_name, tracking_uri):
-    root = Path("artifacts/mlflow").resolve()
-    local_uri = "sqlite:///" + str(root / "mlflow.db")
-    uri = tracking_uri or os.environ.get("MLFLOW_TRACKING_URI") or local_uri
-    if uri == local_uri:
+    uri = resolve_tracking_uri(tracking_uri)
+    client = mlflow.MlflowClient(tracking_uri=uri)
+    experiment = client.get_experiment_by_name(experiment_name)
+    if experiment_name == EXPERIMENT and client.get_experiment_by_name(LEGACY_EXPERIMENT):
+        raise RuntimeError("The original rebuild experiment exists. Rename it in place before training.")
+    if experiment is None and uri == LOCAL_URI:
+        root = Path(__file__).resolve().parents[1] / "artifacts/mlflow"
         root.mkdir(parents=True, exist_ok=True)
-        mlflow.set_tracking_uri(uri)
-        if mlflow.get_experiment_by_name(experiment_name) is None:
-            mlflow.create_experiment(experiment_name, artifact_location=(root / "artifacts").as_uri())
-    else:
-        mlflow.set_tracking_uri(uri)
+        client.create_experiment(experiment_name, artifact_location=(root / "artifacts").as_uri())
+    mlflow.set_tracking_uri(uri)
     mlflow.set_experiment(experiment_name)
     return uri
 
@@ -377,8 +378,7 @@ def tune_top_models(x_train, y_train, train_dates, x_val, y_val, report,
     if train_dates.max() > pd.Timestamp(report["train_last_date"]) or train_dates.max() >= pd.Timestamp(report["validation_first_date"]):
         raise ValueError("Training dates must precede outer validation")
     folds = chronological_folds(x_train, train_dates)
-    local_uri = "sqlite:///" + str(Path("artifacts/mlflow/mlflow.db").resolve())
-    _tracking("PBI06_HQ", tracking_uri or local_uri)
+    _tracking("PBI06_HQ", tracking_uri)
     candidates = tuning_candidates() if candidates_override is None else candidates_override
     trials = []
     search_start = perf_counter()
@@ -528,13 +528,11 @@ def load_saved_advanced_results(report, tracking_uri=None):
     import json
     import pandas as pd
 
-    local_uri = "sqlite:///" + str(Path("artifacts/mlflow/mlflow.db").resolve())
-    _tracking("PBI06_HQ", tracking_uri or local_uri)
     if ADVANCED_REFERENCE.exists():
         reference = json.loads(ADVANCED_REFERENCE.read_text(encoding="utf-8"))
     else:
         reference = {"runs": SAVED_ADVANCED_RUNS}
-    client = mlflow.MlflowClient()
+    client = evidence_client(tracking_uri)
     candidates = advanced_candidates()
     results = []
     starts = []
@@ -554,7 +552,7 @@ def load_saved_advanced_results(report, tracking_uri=None):
                 raise ValueError("Saved hyperparameters differ from the current configuration; rerun advanced search.")
         if run.data.params.get("class_weighting") != f"training-only balanced weight strength {strength}":
             raise ValueError("Saved class weighting differs from the current configuration; rerun advanced search.")
-        parameter_file = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="model_parameters.json")
+        parameter_file = client.download_artifacts(run_id=run_id, path="model_parameters.json")
         parameters = json.loads(Path(parameter_file).read_text(encoding="utf-8"))
         metrics = run.data.metrics
         row = {"model": name, "version": "advanced_tuned", "threshold": 0.5,
@@ -932,8 +930,8 @@ def load_seven_model_experiments(report, tracking_uri=None,
     """Load the latest complete seven-model experiment and validate its artifacts."""
     import pandas as pd
 
-    uri = _tracking(experiment_name, tracking_uri)
-    client = mlflow.MlflowClient()
+    client = evidence_client(tracking_uri)
+    uri = tracking_uri or LOCAL_URI
     experiment = client.get_experiment_by_name(experiment_name)
     runs = client.search_runs([experiment.experiment_id], max_results=50000,
                               order_by=["start_time DESC"])
@@ -1080,7 +1078,7 @@ def load_seven_model_experiments(report, tracking_uri=None,
 
 
 def optimize_advanced_thresholds(x_train, y_train, train_dates, x_val, y_val, report,
-                                 advanced_results, tracking_uri=None, member="Han Qian"):
+                                 advanced_results, tracking_uri=None, member="Han Qian", evidence_uri=None):
     """Select thresholds on training-only chronological predictions, then score validation.
 
     Hyperparameters are fixed from the saved advanced search. Those same inner
@@ -1099,8 +1097,8 @@ def optimize_advanced_thresholds(x_train, y_train, train_dates, x_val, y_val, re
     if len(advanced_results) != 3 or set(by_name) != {"lightgbm", "catboost", "random_forest"}:
         raise ValueError("Exactly one advanced result is required for each selected model")
     folds = chronological_folds(x_train, train_dates)
-    local_uri = "sqlite:///" + str(Path("artifacts/mlflow/mlflow.db").resolve())
-    _tracking("PBI06_HQ", tracking_uri or local_uri)
+    _tracking("PBI06_HQ", tracking_uri)
+    source = evidence_client(evidence_uri or tracking_uri)
     for name, original in by_name.items():
         current = model_candidates()[name].set_params(**original["selected_changes"]).get_params()
         saved = original["parameters"]
@@ -1137,8 +1135,8 @@ def optimize_advanced_thresholds(x_train, y_train, train_dates, x_val, y_val, re
     results = []
     with threadpool_limits(limits=4):
         for name, original in by_name.items():
-            model_file = mlflow.artifacts.download_artifacts(run_id=original["run_id"], artifact_path="model/model.joblib")
-            prep_file = mlflow.artifacts.download_artifacts(run_id=original["run_id"], artifact_path="model/preprocessor.joblib")
+            model_file = source.download_artifacts(run_id=original["run_id"], path="model/model.joblib")
+            prep_file = source.download_artifacts(run_id=original["run_id"], path="model/preprocessor.joblib")
             model = joblib.load(model_file)
             preprocessor = joblib.load(prep_file)
             val = preprocessor.transform(x_val).astype(np.float32)
@@ -1205,9 +1203,7 @@ def load_finalized_results(report, tracking_uri=None):
     import json
     import pandas as pd
 
-    local_uri = "sqlite:///" + str(Path("artifacts/mlflow/mlflow.db").resolve())
-    _tracking("PBI06_HQ", tracking_uri or local_uri)
-    client = mlflow.MlflowClient()
+    client = evidence_client(tracking_uri)
     groups = {}
     initial_starts = []
     try:
@@ -1222,8 +1218,8 @@ def load_finalized_results(report, tracking_uri=None):
                     if str(run.data.params[key]) != str(report[report_key]):
                         raise ValueError(f"Historical run {run_id} does not match the current split")
                 for path in ("model/model.joblib", "model/preprocessor.joblib", "model/inference.json", "precision_recall.png"):
-                    mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path=path)
-                parameter_file = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="model_parameters.json")
+                    client.download_artifacts(run_id=run_id, path=path)
+                parameter_file = client.download_artifacts(run_id=run_id, path="model_parameters.json")
                 params = json.loads(Path(parameter_file).read_text(encoding="utf-8"))
                 metrics = run.data.metrics
                 row = {"model": name, "version": version, "threshold": float(run.data.params["threshold"]),
@@ -1265,7 +1261,7 @@ def load_finalized_results(report, tracking_uri=None):
             trials.append({"model": name, "candidate": candidate, "fold": int(run.data.params["fold"]),
                            "inner_f1": run.data.metrics["f1"], "parameters": changes,
                            "weight_strength": strength, "run_id": run.info.run_id})
-        advanced, advanced_trials = load_saved_advanced_results(report, tracking_uri=local_uri)
+        advanced, advanced_trials = load_saved_advanced_results(report, tracking_uri=tracking_uri)
         if {r["run_id"] for r in advanced} != set(FINAL_COMPARISON_RUNS["advanced_tuned"].values()):
             raise ValueError("Current advanced reference differs from the frozen historical comparison")
         return groups, pd.DataFrame(trials).sort_values(["fold", "model", "candidate"]), advanced_trials

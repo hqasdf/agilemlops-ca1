@@ -1,6 +1,6 @@
 # PBI 06 — Seven-family model comparison
 
-The rebuilt workflow evaluated all seven model families on the frozen chronological development split. Local MLflow parent run `939506bd3eb6434c8489d5871ea9778e` in `PBI06_SevenFamily_Rebuild`.
+The rebuilt workflow evaluated all seven model families on the frozen chronological development split. Local MLflow parent run `939506bd3eb6434c8489d5871ea9778e` in `PBI06_HanQian`.
 
 ## Ranked validation leaderboard
 

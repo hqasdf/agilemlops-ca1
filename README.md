@@ -41,7 +41,7 @@ source .venv/bin/activate
 PBI06_MODE=full jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.kernel_name=python3 --ExecutePreprocessor.timeout=14400 "ca1 hq file.ipynb"
 ```
 
-Full mode runs seven baselines, ten ordinary and 24 advanced configurations per family, then calibrates the selected models on reserved training dates. The results go to the local `PBI06_SevenFamily_Rebuild` experiment. Run All defaults to `reuse` when a new kernel starts without `PBI06_MODE`. Keep `artifacts/mlflow/` and `artifacts/sealed_holdout_order_keys.sha256` together with the development environment. To view the evidence locally, launch MLflow from the project directory:
+Full mode runs seven baselines, ten ordinary and 24 advanced configurations per family, then calibrates the selected models on reserved training dates. The results go to `PBI06_HanQian` on the configured tracking server, with local SQLite as the default. Run All defaults to `reuse` when a new kernel starts without `PBI06_MODE`. Keep `artifacts/mlflow/` and `artifacts/sealed_holdout_order_keys.sha256` together with the development environment. To view the evidence locally, launch MLflow from the project directory:
 
 ```bash
 source .venv/bin/activate
@@ -158,3 +158,46 @@ for result in results:
 If `tracking_uri` and `MLFLOW_TRACKING_URI` are unset, runs are local under `artifacts/mlflow/`. Configure the shared URI and any credentials outside the repository; connectivity and artifact storage on AWS have **not** been verified. `split_report` is a caller-supplied contract: use PBI 03 to ensure the dates and rows actually correspond. Applying saved thresholds to a new batch does not guarantee the same accuracy; monitor drift and assess on a properly separated validation period. The user's historical EDA examined full-data labels before the holdout existed.
 
 To retrain a specific rebuilt configuration, pass `configurations={family: {"params": parameters, "weight": strength, "threshold": cutoff}}` using the approved policy values from the research report or the final MLflow run's `model/inference.json`. Omit this keyword to keep the original fixed CatBoost and LightGBM behavior. A fresh refit can shift probability scores, so the callable reports validation metrics at the supplied cutoff. The PBI 10 team pipeline and its three-minute runtime remain to be verified.
+
+### Shared MLflow publication for the completed PBI 06 rebuild
+
+From the project root, configure your shared tracking destination before opening Jupyter or calling a training entry point.
+
+```bash
+source .venv/bin/activate
+export MLFLOW_TRACKING_URI=http://mlflow-aws-eb.eba-9bnrxizu.us-east-1.elasticbeanstalk.com
+python -m src.pbi06_publish
+jupyter lab "ca1 hq file.ipynb"
+```
+
+The publication command resumes the approved 491-run tree by its source run IDs. Run it from one machine at a time. It verifies copied metrics and files and records a local receipt under `artifacts/pbi06_publish/`. Ordinary Run All reads the saved modelling evidence and queries the shared publication status. The configured remote is used for future writes, and a remote connection error is surfaced to the caller. The local fallback applies when no destination is configured.
+
+The approved historical notebook evidence still uses local SQLite and its original fingerprint. For later runs logged directly to shared MLflow, set `PBI06_EVIDENCE_URI` to that tracking URI and keep the corresponding local private predictions under `artifacts/pbi06_private/`. The shared publication excludes the historical `predictions.npz` and removes per-row sample weights from the exported Random Forest copies.
+
+The AWS proxy can reject large artifacts with HTTP 413. The publisher stores those files as verified parts beneath `<artifact>.parts/`. To retrieve either a standard or split model artifact, use the same downloader used by verification:
+
+```python
+from pathlib import Path
+import os
+from mlflow import MlflowClient
+from src.pbi06_publish import download_published_artifact
+
+folder = Path("artifacts/downloaded_models")
+folder.mkdir(parents=True, exist_ok=True)
+client = MlflowClient(tracking_uri=os.environ["MLFLOW_TRACKING_URI"])
+model_path = download_published_artifact(client, shared_run_id, "model/model.joblib", folder)
+```
+
+The publisher records the shared experiment and parent IDs under `artifacts/pbi06_publish/destination.json`. If the endpoint comes back with a different or empty tracking store, the command stops before creating replacement runs. Resume after the original experiment and its parent are available at the configured endpoint.
+
+If the original AWS store returns, run `python -m src.pbi06_publish --rename-original` to verify its experiment ID and parent before renaming it in place. Then run the normal publisher to finish verification.
+
+If the original store is gone, confirm the replacement endpoint and its tracking and artifact persistence with the team first. After explicit approval and a successful synthetic tracking and artifact probe, run:
+
+```bash
+python -m src.pbi06_publish --recover-replacement \
+    --readiness-file artifacts/pbi06_publish/readiness.json \
+    --workers 4 --batch-size 24
+```
+
+The readiness JSON contains the finished probe's `run_id` and the SHA-256 of its `readiness.txt` artifact. The probe in Default uses parameter `scope=synthetic` and metric `probe=1`. The publisher checks the probe again before creating the experiment, uploads and loads all seven final models first, and checks that previously verified runs remain available between batches. A failed check stops further batches. After a successful first publication, use the normal command to resume on the recorded backend.

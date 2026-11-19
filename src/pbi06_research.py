@@ -4,6 +4,7 @@ import json
 from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter
+from copy import copy
 from tempfile import TemporaryDirectory
 
 import joblib
@@ -11,14 +12,15 @@ import mlflow
 import numpy as np
 import pandas as pd
 from sklearn.metrics import precision_recall_curve
+from sklearn.ensemble import RandomForestClassifier
 from threadpoolctl import threadpool_limits
 
 from src.data_access import SEALED_START, VALIDATION_START
 from src.feature_engineering import INPUT_FEATURES, fit_preprocessor, training_sample_weights
 from src.model_evaluation import best_f1_threshold, recent_training_window
+from src.pbi06_tracking import (LOCAL_URI, COMPLETED_RUN, COMPLETED_FINGERPRINT,
+                                OLD_SOURCES, TRACKING_PATCH_SOURCES, resolve_tracking_uri, EXPERIMENT)
 
-EXPERIMENT = "PBI06_SevenFamily_Rebuild"
-LOCAL_URI = "sqlite:///" + str(Path("artifacts/mlflow/mlflow.db").resolve())
 SEED = 42
 BUDGETS = (10, 24)
 
@@ -138,13 +140,14 @@ def _guard(x_train, y_train, dates, x_val, y_val, report, val_dates):
     return train_dates, val_dates
 
 
-def _fingerprint(frames):
+def _fingerprint(frames, source_overrides=None):
     packages = {p: version(p) for p in ("numpy", "pandas", "scipy", "scikit-learn", "mlflow",
                 "xgboost", "lightgbm", "catboost", "joblib", "threadpoolctl")}
     source = Path(__file__).parent
     hashes = {name: hashlib.sha256((source / name).read_bytes()).hexdigest()
               for name in ("pbi06_research.py", "train_hq.py", "feature_engineering.py",
                            "data_access.py", "data_cleaning.py", "model_evaluation.py")}
+    hashes.update(source_overrides or {})
     metadata = {"packages": packages, "sources": hashes, "schema": INPUT_FEATURES,
                 "budgets": list(BUDGETS), "seed": SEED}
     digest = hashlib.sha256(_key(metadata).encode())
@@ -185,8 +188,17 @@ def _winner(trials):
 def _save_model(model, path):
     with TemporaryDirectory() as tmp:
         file = Path(tmp) / "model.joblib"
+        if (mlflow.get_tracking_uri().lower().startswith(("http://", "https://"))
+                and isinstance(model, RandomForestClassifier)):
+            model = copy(model)
+            model._sample_weight = None
         joblib.dump(model, file, compress=3)
-        mlflow.log_artifact(str(file), path)
+        if mlflow.get_tracking_uri().lower().startswith(("http://", "https://")):
+            from src.pbi06_publish import log_shared_artifact
+            client = mlflow.MlflowClient(tracking_uri=mlflow.get_tracking_uri())
+            log_shared_artifact(client, mlflow.active_run().info.run_id, f"{path}/model.joblib", file, tmp)
+        else:
+            mlflow.log_artifact(str(file), path)
 
 
 def _save_preprocessor(preprocessor, path):
@@ -286,19 +298,24 @@ def _prepared_folds(x, y, dates, start_log):
     return result
 
 
-def _paths(client, run_id):
-    return {name: client.download_artifacts(run_id, f"model/{name}")
-            for name in ("model.joblib", "preprocessor.joblib", "inference.json")}
+def _paths(client, run_id, directory):
+    names = ("model.joblib", "preprocessor.joblib", "inference.json")
+    if client.tracking_uri.lower().startswith(("http://", "https://")):
+        from src.pbi06_publish import download_published_artifact
+        return {name: download_published_artifact(client, run_id, f"model/{name}", directory)
+                for name in names}
+    return {name: client.download_artifacts(run_id, f"model/{name}") for name in names}
 
 
 def _verify_final(client, rows, x_val, y_val, predictions):
     from src.train_hq import validation_metrics
 
     for row in rows:
-        paths = _paths(client, row["run_id"])
-        metadata = json.loads(Path(paths["inference.json"]).read_text())
-        model = joblib.load(paths["model.joblib"])
-        prep = joblib.load(paths["preprocessor.joblib"])
+        with TemporaryDirectory() as tmp:
+            paths = _paths(client, row["run_id"], tmp)
+            metadata = json.loads(Path(paths["inference.json"]).read_text())
+            model = joblib.load(paths["model.joblib"])
+            prep = joblib.load(paths["preprocessor.joblib"])
         name = row["family"]
         if metadata["threshold"] != row["threshold"] or metadata["input_features"] != INPUT_FEATURES:
             raise RuntimeError(f"Mismatched inference metadata: {name}")
@@ -312,12 +329,18 @@ def _verify_final(client, rows, x_val, y_val, predictions):
                                        rtol=1e-10, atol=1e-12)
 
 
-def _save_evidence(evidence, predictions):
-    mlflow.log_dict(evidence, "evidence.json")
+def _save_evidence(evidence, predictions, uri):
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "predictions.npz"
         np.savez_compressed(path, **predictions)
-        mlflow.log_artifact(str(path))
+        if uri.lower().startswith(("http://", "https://")):
+            private = Path("artifacts/pbi06_private") / evidence["run_id"]
+            private.mkdir(parents=True, exist_ok=True, mode=0o700)
+            (private / path.name).write_bytes(path.read_bytes())
+            evidence["private_predictions_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:
+            mlflow.log_artifact(str(path))
+    mlflow.log_dict(evidence, "evidence.json")
     mlflow.set_tag("verified_complete", "true")
 
 
@@ -339,7 +362,14 @@ def _load_evidence(client, run_id, fingerprint):
     evidence = json.loads(Path(client.download_artifacts(run_id, "evidence.json")).read_text())
     if evidence["run_id"] != run_id or evidence["fingerprint"] != fingerprint:
         raise RuntimeError("PBI 06 evidence fingerprint does not match")
-    with np.load(client.download_artifacts(run_id, "predictions.npz")) as archive:
+    private_hash = evidence.get("private_predictions_sha256")
+    if private_hash:
+        path = Path("artifacts/pbi06_private") / run_id / "predictions.npz"
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != private_hash:
+            raise RuntimeError("Local private predictions are missing or do not match the shared run")
+    else:
+        path = client.download_artifacts(run_id, "predictions.npz")
+    with np.load(path) as archive:
         predictions = {key: archive[key] for key in archive.files}
     return evidence, predictions
 
@@ -353,15 +383,29 @@ def threshold_curve(y, scores):
     return pd.DataFrame({"threshold": thresholds, "precision": precision, "recall": recall, "f1": f1})
 
 
-def research_stages(x_train, y_train, dates, x_val, y_val, val_dates, report, mode="reuse", run_id=None):
+def research_stages(x_train, y_train, dates, x_val, y_val, val_dates, report, mode="reuse", run_id=None, tracking_uri=None, evidence_uri=None):
     """Yield baseline, ordinary, advanced, selections, and verified final evidence in order."""
     from src.train_hq import _tracking, validation_metrics
 
     dates, val_dates = _guard(x_train, y_train, dates, x_val, y_val, report, val_dates)
-    fingerprint, provenance = _fingerprint((x_train, y_train, dates, x_val, y_val, val_dates))
-    client = mlflow.MlflowClient(tracking_uri=LOCAL_URI)
+    frames = (x_train, y_train, dates, x_val, y_val, val_dates)
+    fingerprint, provenance = _fingerprint(frames)
     if mode == "reuse":
-        evidence, predictions = _load_evidence(client, run_id, fingerprint)
+        client = mlflow.MlflowClient(tracking_uri=evidence_uri or LOCAL_URI)
+        try:
+            evidence, predictions = _load_evidence(client, run_id, fingerprint)
+        except RuntimeError:
+            if (run_id not in (None, COMPLETED_RUN)
+                    or not TRACKING_PATCH_SOURCES
+                    or any(provenance["sources"].get(name) != sha
+                           for name, sha in TRACKING_PATCH_SOURCES.items())):
+                raise
+            old_fingerprint, old_provenance = _fingerprint(frames, OLD_SOURCES)
+            if old_fingerprint != COMPLETED_FINGERPRINT:
+                raise
+            evidence, predictions = _load_evidence(client, COMPLETED_RUN, old_fingerprint)
+            if evidence["provenance"] != old_provenance:
+                raise RuntimeError("Historical PBI 06 provenance does not match")
         for stage in ("baseline", "ordinary", "advanced", "selected"):
             yield evidence[stage]
         with threadpool_limits(limits=4):
@@ -370,7 +414,8 @@ def research_stages(x_train, y_train, dates, x_val, y_val, val_dates, report, mo
         return
     if mode != "full":
         raise ValueError("Notebook mode must be 'full' or 'reuse'")
-    _tracking(EXPERIMENT, LOCAL_URI)
+    uri = _tracking(EXPERIMENT, resolve_tracking_uri(tracking_uri))
+    client = mlflow.MlflowClient(tracking_uri=uri)
     recent = recent_training_window(dates)
     x_fit, y_fit, fit_dates = x_train.loc[~recent], y_train.loc[~recent], dates.loc[~recent]
     x_cal, y_cal, cal_dates = x_train.loc[recent], y_train.loc[recent], dates.loc[recent]
@@ -475,5 +520,5 @@ def research_stages(x_train, y_train, dates, x_val, y_val, val_dates, report, mo
         with threadpool_limits(limits=4):
             _verify_final(client, evidence["final"], x_val, y_val, predictions)
         evidence["seconds"]["artifact_verification"] = perf_counter() - began
-        _save_evidence(evidence, predictions)
+        _save_evidence(evidence, predictions, uri)
     yield evidence, predictions
