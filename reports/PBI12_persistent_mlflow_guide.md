@@ -1,7 +1,7 @@
 # PBI 12: Persistent MLflow storage setup guide
 
 **Owner:** Nithish (`nith-ish22`)
-**Status:** Preparation only; no AWS changes or persistence verification have been made by this branch.
+**Status:** Planning document written before the work. Superseded by [PBI12_MLFLOW_STORAGE.md](PBI12_MLFLOW_STORAGE.md), which records what was built and the verification results.
 **Purpose:** Make the shared MLflow service retain experiment metadata, registered models and model artifacts when its Elastic Beanstalk container is replaced.
 
 ## 1. Requirements and evidence
