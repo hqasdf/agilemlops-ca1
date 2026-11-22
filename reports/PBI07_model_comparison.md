@@ -110,3 +110,15 @@ Against the historical PBI 07 validation table, the fixed-threshold logistic F1 
 The prior HGB native categorical and monotonic constraints were removed to use the common one-hot representation. This changes model behavior and is a new model version, not a like-for-like repeat. The first-order timestamp's point-in-time provenance and an independent order-to-customer mapping remain production blockers. PBI 08 has not been integrated because Ephraim's notebook is not present in this local checkout.
 
 During verification, the notebook was first run with the split helper's row-quantile default, which began validation on 25 February instead of the frozen 15 March boundary. Those three preliminary `shared-eight-feature` runs remain in the local experiment store with their split dates and metrics intact; they are superseded and must not be used for team comparison. After detecting this, `prepare_data()` was corrected to pass the shared `VALIDATION_START`, and the three run IDs listed in the table above were produced on the aligned dates. No existing runs were deleted or edited.
+
+## Shared MLflow runs (22 November 2026)
+
+The shared-eight-feature notebook was rerun from top to bottom against the new shared MLflow server (Elastic Beanstalk environment `mlflow-pbi12`, RDS MySQL metadata, S3 artifacts; see `PBI12_MLFLOW_STORAGE.md`). All cells completed with no errors. The runs are in experiment 3 on the shared server.
+
+| Version | Shared MLflow run |
+| --- | --- |
+| v1 shared logistic, fixed | [`c10fc24f606349d489314e67f665b3d1`](http://mlflow-pbi12.eba-9bnrxizu.us-east-1.elasticbeanstalk.com/#/experiments/3/runs/c10fc24f606349d489314e67f665b3d1) |
+| v2 shared logistic, calibrated | [`5c40eaf968a6471297d39f7ce9704917`](http://mlflow-pbi12.eba-9bnrxizu.us-east-1.elasticbeanstalk.com/#/experiments/3/runs/5c40eaf968a6471297d39f7ce9704917) |
+| v3 shared HistGradientBoosting | [`b19132dd57a74c638697e6a86d1bf1a4`](http://mlflow-pbi12.eba-9bnrxizu.us-east-1.elasticbeanstalk.com/#/experiments/3/runs/b19132dd57a74c638697e6a86d1bf1a4) |
+
+The "Local MLflow run ID" values in the tables above refer to earlier local runs and are kept as history. The shared links above are the ones to use for team comparison. The checklist item "Log each final run to the shared MLflow service" is still open until loading each model artifact back from the shared server is shown.
