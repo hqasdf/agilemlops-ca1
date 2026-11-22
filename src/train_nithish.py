@@ -42,6 +42,7 @@ from src.feature_engineering import (
     build_preprocessor, prepare_training_data,
 )
 from src.data_access import VALIDATION_START
+from src.mlflow_remote import ensure_server_reachable
 from src.model_evaluation import best_f1_threshold, recent_training_window as _recent_training_window
 
 MEMBER = "nith-ish22"
@@ -131,6 +132,7 @@ def _set_tracking(tracking_uri, experiment_name):
     local = Path("artifacts/mlflow").resolve()
     uri = tracking_uri or os.environ.get("MLFLOW_TRACKING_URI")
     if uri:
+        ensure_server_reachable(uri)  # remote server: fail early with a clear message
         mlflow.set_tracking_uri(uri)
     else:                                              # same local store layout as PBI 06
         local.mkdir(parents=True, exist_ok=True)
