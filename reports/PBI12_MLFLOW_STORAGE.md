@@ -259,7 +259,7 @@ The last check loads the model from S3 through the server and confirms its predi
 
 ## 9. GenAI web conversation (criterion 2)
 
-The CA1 specification asks for the investigation and design to be done through a GenAI web chat with fewer than 10 prompting rounds and no local coding agent. The shareable link to that conversation: **(add link here)**.
+The CA1 specification asks for the investigation and design to be done through a GenAI web chat with fewer than 10 prompting rounds and no local coding agent. The shareable link to that conversation: https://claude.ai/share/60d64645-d228-48de-9c92-293091fad6dc.
 
 ## 10. Known limits
 
