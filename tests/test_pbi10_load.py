@@ -1,6 +1,7 @@
 import unittest
 import pandas as pd
 from src.pbi10_load import load_cleaned_batch
+from src.pbi04_load import load_table
 
 
 class Connection:
@@ -15,6 +16,8 @@ class Connection:
 
 
 class LoadTests(unittest.TestCase):
+    def test_actual_pbi04_loader_is_importable(self):
+        self.assertTrue(callable(load_table))
     def frames(self):
         return {'customers':pd.DataFrame([{'country_code':'MY','customer_id':'c1','mobile_verified':None,'num_orders_last_50days':1,'num_cancelled_orders_last_50days':0,'num_refund_orders_last_50days':0,'total_payment_last_50days':10,'num_associated_customers':0,'first_order_datetime':None}]),
                 'orders':pd.DataFrame([{'country_code':'MY','order_id':'o1','collect_type':'delivery','payment_method':None,'order_value':10,'num_items_ordered':1,'refund_value':0,'order_date':'2023-01-01'}]),

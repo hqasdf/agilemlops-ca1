@@ -9,7 +9,9 @@ from tempfile import TemporaryDirectory
 from src.pbi10_db_contract import COLUMNS, validate_db_contract
 
 
-def load_cleaned_batch(connection, cleaned, load_table):
+def load_cleaned_batch(connection, cleaned, load_table=None):
+    if load_table is None:
+        from src.pbi04_load import load_table
     names = ('customers', 'orders', 'labels')
     if set(cleaned) != set(names):
         raise ValueError('A cleaned frame is required for each table')
