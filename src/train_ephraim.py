@@ -68,6 +68,8 @@ def train_ephraim_models(x_train, y_train, x_val, y_val, tracking_uri=None, batc
         pipeline = Pipeline([('preprocessor', preprocessor), ('classifier', estimator)])
         if tracking_uri:
             import mlflow
+            import pandas as pd
+            import sklearn
             mlflow.set_tracking_uri(tracking_uri)
             mlflow.set_experiment("PBI08_Ephraim")
             with mlflow.start_run(run_name=f"pbi08/{batch_name}/{name}",
@@ -77,7 +79,12 @@ def train_ephraim_models(x_train, y_train, x_val, y_val, tracking_uri=None, batc
                 mlflow.log_metrics({k: float(v) for k, v in metrics.items()})
                 mlflow.log_metric("fit_seconds", seconds)
                 run_id = run.info.run_id
-                model_info = mlflow.sklearn.log_model(pipeline, artifact_path='model')
+                # Match the team's existing MLflow serialization for our own models.
+                model_info = mlflow.sklearn.log_model(
+                    pipeline, artifact_path='model', serialization_format='cloudpickle',
+                    pip_requirements=[f'scikit-learn=={sklearn.__version__}',
+                                      f'pandas=={pd.__version__}', f'numpy=={np.__version__}',
+                                      f'mlflow=={mlflow.__version__}'])
                 model_uri = model_info.model_uri
         out.append({"name": name, "pipeline": pipeline,
                     "metrics": metrics, "fit_seconds": seconds, "run_id": run_id, "model_uri": model_uri})
