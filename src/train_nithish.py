@@ -253,7 +253,7 @@ def evaluate(model, x_val, y_val, cutoff):
 
 
 def train_nithish_models(customers, orders, labels, tracking_uri=None, experiment_name=EXPERIMENT,
-                         batch_name="base", versions=None, log=True):
+                         batch_name="base", versions=None, log=True, prepared_data=None):
     """Clean tables in, three trained versions out. Call this from the PBI 10 pipeline.
 
     customers, orders, labels: retained outputs of the PBI 02 cleaners.
@@ -267,7 +267,8 @@ def train_nithish_models(customers, orders, labels, tracking_uri=None, experimen
     if unknown:
         raise ValueError(f"Unknown model version(s): {unknown}. Choose from {list(VERSIONS)}")
 
-    x_train, y_train, x_val, y_val, train_dates, report = prepare_data(customers, orders, labels)
+    x_train, y_train, x_val, y_val, train_dates, report = (prepare_data(customers, orders, labels)
+                                                         if prepared_data is None else prepared_data)
     if log:
         _set_tracking(tracking_uri, experiment_name)
     recent = recent_training_window(train_dates)
@@ -308,3 +309,5 @@ if __name__ == "__main__":
         m = row["metrics"]
         print(f"{row['version']:28s} F1 {m['f1']:.4f}  precision {m['precision']:.4f}  "
               f"recall {m['recall']:.4f}  AP {m['average_precision']:.4f}  run {row.get('run_id')}")
+
+
