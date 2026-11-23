@@ -21,6 +21,7 @@ class HoldoutTests(unittest.TestCase):
         self.assertEqual(result[6]['training_rows']+result[6]['validation_rows'],3)
         self.assertEqual(result[6]['new_training_rows'],0)
         self.assertEqual(result[6]['new_validation_rows'],1)
+        self.assertEqual(result[6]['new_training_indices'],[])
     def test_manifest_requires_correct_hashes(self):
         with TemporaryDirectory() as root:
             path=Path(root)/'holdout.txt'

@@ -189,6 +189,7 @@ def prepare_training_data(customers, orders, labels, include_test=False,
             raise ValueError('Current batch keys must belong to the new-order allowlist')
         report['new_training_rows'] = sum(_key_hash(row.country_code, row.order_id) in counted_keys for row in train_rows.itertuples())
         report['new_validation_rows'] = sum(_key_hash(row.country_code, row.order_id) in counted_keys for row in val_rows.itertuples())
+        report['new_training_indices'] = [int(row.Index) for row in train_rows.itertuples() if _key_hash(row.country_code, row.order_id) in counted_keys]
     if include_training_dates:
         report["training_dates"] = train_rows["order_date"].copy()
     train_dates = train_rows["order_date"].copy()

@@ -25,7 +25,8 @@ def train_member(member, prepared, batch_id, tracking_uri, hq=None, nithish=None
     elif member=='nithish':
         if nithish is None:
             from src.train_nithish import train_nithish_models as nithish
-        results=nithish(None,None,None,tracking_uri=tracking_uri,batch_name=batch_id,prepared_data=prepared)
+        results=nithish(None,None,None,tracking_uri=tracking_uri,batch_name=batch_id,prepared_data=prepared,
+                        current_batch_indices=report['new_training_indices'])
     else:
         if ephraim is None:
             from src.train_ephraim import train_ephraim_models as ephraim

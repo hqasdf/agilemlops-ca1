@@ -253,7 +253,8 @@ def evaluate(model, x_val, y_val, cutoff):
 
 
 def train_nithish_models(customers, orders, labels, tracking_uri=None, experiment_name=EXPERIMENT,
-                         batch_name="base", versions=None, log=True, prepared_data=None):
+                         batch_name="base", versions=None, log=True, prepared_data=None,
+                         current_batch_indices=None):
     """Clean tables in, three trained versions out. Call this from the PBI 10 pipeline.
 
     customers, orders, labels: retained outputs of the PBI 02 cleaners.
@@ -273,6 +274,8 @@ def train_nithish_models(customers, orders, labels, tracking_uri=None, experimen
         _set_tracking(tracking_uri, experiment_name)
     recent = recent_training_window(train_dates)
     fit_rows = ~recent
+    if current_batch_indices is not None and not x_train.loc[fit_rows].index.isin(current_batch_indices).any():
+        raise ValueError('No current-batch rows are available for Nithish model fitting')
     fitted, cutoffs, results = {}, {}, []
     for version in requested_versions:
         spec = VERSIONS[version]
