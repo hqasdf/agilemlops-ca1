@@ -31,6 +31,10 @@ python pbi10_pipeline.py --config ~/ca1.env \
 
 The PBI 04 loader reads the same names as defaults for `--host`, `--port`, `--user`, `--database` and `--ssl-ca`; the password comes from `CA1_DB_PASSWORD` or a hidden prompt.
 
+## Windows
+
+Set `PYTHONUTF8=1` before running the pipeline on Windows. Without it the MLflow run messages contain emoji that the default cp1252 console encoding cannot print, and the Han Qian and Ephraim training steps fail with `UnicodeEncodeError` (seen in a full-history test on 23 Nov 2026).
+
 ## Errors and secrets
 
 - A missing setting stops the run before any connection or download, and the message lists the missing names and how to set them. Example: `Missing required settings: CA1_DB_HOST, MLFLOW_TRACKING_URI. Set them as environment variables, or put KEY=VALUE lines in a config file ...`
