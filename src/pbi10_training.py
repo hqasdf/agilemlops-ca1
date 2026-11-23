@@ -1,14 +1,29 @@
 """Adapters for the team's existing training functions."""
 
 
+def choose_batch_validation_start(orders, labels, current_batch_keys):
+    import pandas as pd
+    from src.data_access import _key_hash
+    keys={'country_code','order_id'}
+    if not current_batch_keys or not keys.issubset(orders.columns) or not keys.issubset(labels.columns):
+        raise ValueError('Current order keys and labels are required')
+    matched=orders.merge(labels[['country_code','order_id']],on=['country_code','order_id'],how='inner',validate='one_to_one')
+    mask=[_key_hash(row.country_code,row.order_id) in current_batch_keys for row in matched.itertuples()]
+    dates=pd.to_datetime(matched.loc[mask,'order_date'],errors='coerce').dropna().sort_values().unique()
+    if len(dates)<2:
+        raise ValueError('Current labelled batch needs at least two distinct valid order dates for chronological validation')
+    return pd.Timestamp(dates[min(int(len(dates)*0.8),len(dates)-1)])
+
+
 def prepare_retraining(tables, sealed_keys, new_keys, current_batch_keys):
     from src.feature_engineering import prepare_training_data
     if not current_batch_keys or not set(current_batch_keys).issubset(new_keys):
         raise ValueError('Current batch order keys must be in the verified new-order allowlist')
+    validation_start=choose_batch_validation_start(tables['orders'],tables['labels'],current_batch_keys)
     x_train,y_train,x_val,y_val,_,_,report,dates=prepare_training_data(
         tables['customers'],tables['orders'],tables['labels'],
         include_training_dates=True,sealed_order_keys=sealed_keys,new_order_keys=new_keys,
-        current_batch_keys=current_batch_keys)
+        current_batch_keys=current_batch_keys,validation_start_date=validation_start)
     if report['new_training_rows'] < 1:
         raise ValueError('No new labelled orders are in the training split; review the split before retraining')
     return x_train,y_train,x_val,y_val,dates,report

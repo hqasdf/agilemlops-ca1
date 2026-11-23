@@ -6,13 +6,13 @@ from src.pbi10_training import train_member, prepare_retraining
 class TrainingAdapterTests(unittest.TestCase):
     def test_refuses_retraining_when_no_new_record_is_used(self):
         split=('xtrain','ytrain','xval','yval',None,None,{'new_training_rows':0},'dates')
-        with patch('src.feature_engineering.prepare_training_data',return_value=split):
+        with patch('src.feature_engineering.prepare_training_data',return_value=split), patch('src.pbi10_training.choose_batch_validation_start',return_value='2026-01-01'):
             with self.assertRaisesRegex(ValueError,'new labelled'):
                 prepare_retraining({'customers':1,'orders':2,'labels':3},{'sealed'},{'new'},{'new'})
 
     def test_prepare_retraining_passes_verified_keys(self):
         split=('xt','yt','xv','yv',None,None,{'new_training_rows':1},'dates')
-        with patch('src.feature_engineering.prepare_training_data',return_value=split) as prepare:
+        with patch('src.feature_engineering.prepare_training_data',return_value=split) as prepare, patch('src.pbi10_training.choose_batch_validation_start',return_value='2026-01-01'):
             result=prepare_retraining({'customers':1,'orders':2,'labels':3},{'sealed'},{'new'},{'new'})
         self.assertEqual(result,('xt','yt','xv','yv','dates',{'new_training_rows':1}))
         self.assertEqual(prepare.call_args.kwargs['new_order_keys'],{'new'})

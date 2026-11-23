@@ -17,6 +17,23 @@ def recent_training_window(train_dates, share=0.20):
     return recent
 
 
+def historical_calibration_mask(train_dates, current_batch_indices, share=0.20):
+    """Reserve historical calibration rows while retaining current rows for fit.
+
+    The calibration rows predate some fitted rows; disclose that difference.
+    """
+    if not train_dates.index.is_unique:
+        raise ValueError('Training indices must be unique')
+    current=train_dates.index.isin(current_batch_indices)
+    if not current.any() or current.all():
+        raise ValueError('Both historical and current-batch training rows are required')
+    historical=train_dates.loc[~current]
+    recent=recent_training_window(historical,share)
+    mask=pd.Series(False,index=train_dates.index)
+    mask.loc[recent.index]=recent
+    return mask
+
+
 def best_f1_threshold(y_true, probabilities):
     """Choose the threshold with maximum fraud F1; break ties toward higher cutoffs."""
     y_true = np.asarray(y_true)
@@ -35,3 +52,5 @@ def best_f1_threshold(y_true, probabilities):
                    out=np.zeros_like(total), where=total != 0)
     best = np.flatnonzero(f1 == f1.max())[-1]
     return float(thresholds[best])
+
+
