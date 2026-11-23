@@ -1,8 +1,21 @@
 import unittest
-from src.pbi10_training import train_member
+from unittest.mock import patch
+from src.pbi10_training import train_member, prepare_retraining
 
 
 class TrainingAdapterTests(unittest.TestCase):
+    def test_refuses_retraining_when_no_new_record_is_used(self):
+        split=('xtrain','ytrain','xval','yval',None,None,{'new_training_rows':0},'dates')
+        with patch('src.feature_engineering.prepare_training_data',return_value=split):
+            with self.assertRaisesRegex(ValueError,'new labelled'):
+                prepare_retraining({'customers':1,'orders':2,'labels':3},{'sealed'},{'new'},{'new'})
+
+    def test_prepare_retraining_passes_verified_keys(self):
+        split=('xt','yt','xv','yv',None,None,{'new_training_rows':1},'dates')
+        with patch('src.feature_engineering.prepare_training_data',return_value=split) as prepare:
+            result=prepare_retraining({'customers':1,'orders':2,'labels':3},{'sealed'},{'new'},{'new'})
+        self.assertEqual(result,('xt','yt','xv','yv','dates',{'new_training_rows':1}))
+        self.assertEqual(prepare.call_args.kwargs['new_order_keys'],{'new'})
     def test_calls_each_member_with_prepared_data(self):
         calls=[]
         def hq(*args,**kw): calls.append(('hq',args,kw)); return [{'run_id':'1','model_uri':'m1'}]

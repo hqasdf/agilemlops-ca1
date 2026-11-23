@@ -99,7 +99,7 @@ def prepare_features(orders, customers):
 
 def prepare_training_data(customers, orders, labels, include_test=False,
                           include_training_dates=False, validation_start_date=None,
-                          sealed_order_keys=None, new_order_keys=None):
+                          sealed_order_keys=None, new_order_keys=None, current_batch_keys=None):
     """Safely join development records and return chronological train/validation data.
 
     By default, reject all orders in the sealed period. The optional retraining
@@ -184,8 +184,11 @@ def prepare_training_data(customers, orders, labels, include_test=False,
         "train_validation_customers": len(train_customers.intersection(val_customers)),
     }
     if new_order_keys is not None:
-        report['new_training_rows'] = sum(_key_hash(row.country_code, row.order_id) in new_order_keys for row in train_rows.itertuples())
-        report['new_validation_rows'] = sum(_key_hash(row.country_code, row.order_id) in new_order_keys for row in val_rows.itertuples())
+        counted_keys = new_order_keys if current_batch_keys is None else current_batch_keys
+        if not set(counted_keys).issubset(new_order_keys):
+            raise ValueError('Current batch keys must belong to the new-order allowlist')
+        report['new_training_rows'] = sum(_key_hash(row.country_code, row.order_id) in counted_keys for row in train_rows.itertuples())
+        report['new_validation_rows'] = sum(_key_hash(row.country_code, row.order_id) in counted_keys for row in val_rows.itertuples())
     if include_training_dates:
         report["training_dates"] = train_rows["order_date"].copy()
     train_dates = train_rows["order_date"].copy()
