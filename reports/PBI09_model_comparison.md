@@ -38,6 +38,7 @@ The system sends orders for human review. It does not reject orders or customers
 | --- | --- |
 | Date | 19 November 2026 |
 | Participants | Nithish, Han Qian, Ephraim |
+| Duration | About 20 minutes |
 | Models reviewed | The first models trained by each member: Han Qian (PBI 06), Nithish (PBI 07), Ephraim (PBI 08) |
 | Decision | The team chose Han Qian's calibrated Random Forest and calibrated CatBoost as the top two, with the Random Forest as the champion. The decision was made in the Scrum meeting. |
 | Basis | Comparable metrics on the same validation window (sections 4 and 5), and the business needs in section 2 |
