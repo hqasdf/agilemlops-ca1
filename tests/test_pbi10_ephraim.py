@@ -11,6 +11,7 @@ class EphraimTrainingTests(unittest.TestCase):
           'collect_type':['delivery']*8,'payment_method':['card']*8,'days_since_first_order':[1,2,3,4,5,6,7,8]})
         labels=pd.Series([0,1,0,1,0,1,0,1])
         mlflow=MagicMock()
+        mlflow.__version__='3.18.0'
         mlflow.start_run.return_value.__enter__.return_value.info.run_id='run-1'
         with patch.dict('sys.modules',{'mlflow':mlflow}):
             out=train_ephraim_models(data.iloc[:6],labels.iloc[:6],data.iloc[6:],labels.iloc[6:],tracking_uri='http://mlflow')
