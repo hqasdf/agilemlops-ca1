@@ -1,6 +1,8 @@
-# PBI 10 pipeline - work in progress
+# PBI 10 pipeline - rehearsal evidence and remaining work
 
-The branch contains an experimental command, `pbi10_pipeline.py`. It is not yet verified with RDS or shared MLflow and must not be used for the assessed demonstration until the checks below pass. The user confirmed the MLflow UI loads at `http://mlflow-pbi12.eba-9bnrxizu.us-east-1.elasticbeanstalk.com`; an automated pipeline connection and artifact retrieval have not been verified.
+On 23 November 2026 an isolated RDS rehearsal used 2,000 linked historical orders and three synthetic 120-row CSVs. The pipeline reported 120 inserts per table, seven runs on the shared MLflow server, 128.247 seconds pipeline time and 131.407 seconds including connection overhead. A Han Qian run displayed 2,096 training rows and 24 validation rows; its model and preprocessor artifacts were visible. This is sample-scale evidence, not a benchmark on the complete historical database. The live rehearsal preceded the later addition of progress messages and run links to the summary; retest those changes. The sealed manifest provenance and the ledger limitations below remain unresolved.
+
+The branch contains `pbi10_pipeline.py`. The live rehearsal described above used a separate rehearsal runner and database; the general entry point, later reporting changes, full-history workload and model artifact retrieval remain to be verified before the assessed demonstration.
 
 The three synthetic files in `practice/pbi10/` are for an isolated rehearsal database only; do not insert synthetic rows into `amlops_ca1`. They contain 120 linked records across multiple order dates, with both label classes. The URLs can be passed to the command without modifying source.
 

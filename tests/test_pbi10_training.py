@@ -4,6 +4,15 @@ from src.pbi10_training import train_member, prepare_retraining
 
 
 class TrainingAdapterTests(unittest.TestCase):
+    def test_run_links_use_actual_experiment_metadata(self):
+        from src.pbi10_training import add_run_links
+        class Client:
+            def get_run(self, run_id):
+                from types import SimpleNamespace
+                return SimpleNamespace(info=SimpleNamespace(experiment_id='42'))
+        runs=[{'run_id':'abc','model_uri':'models:/example'}]
+        linked=add_run_links(runs,'http://tracking.example/',Client())
+        self.assertEqual(linked[0]['run_link'],'http://tracking.example/#/experiments/42/runs/abc')
     def test_refuses_retraining_when_no_new_record_is_used(self):
         split=('xtrain','ytrain','xval','yval',None,None,{'new_training_rows':0},'dates')
         with patch('src.feature_engineering.prepare_training_data',return_value=split), patch('src.pbi10_training.choose_batch_validation_start',return_value='2026-01-01'):

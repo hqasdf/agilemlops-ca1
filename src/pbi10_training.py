@@ -1,6 +1,16 @@
 """Adapters for the team's existing training functions."""
 
 
+def add_run_links(runs, tracking_uri, client):
+    from urllib.parse import quote
+    for row in runs:
+        info = client.get_run(row['run_id']).info
+        row['run_link'] = (tracking_uri.rstrip('/') + '/#/experiments/' +
+                           quote(str(info.experiment_id), safe='') + '/runs/' +
+                           quote(str(row['run_id']), safe=''))
+    return runs
+
+
 def choose_batch_validation_start(orders, labels, current_batch_keys):
     import pandas as pd
     from src.data_access import _key_hash
@@ -32,6 +42,7 @@ def prepare_retraining(tables, sealed_keys, new_keys, current_batch_keys):
 def train_member(member, prepared, batch_id, tracking_uri, hq=None, nithish=None, ephraim=None):
     if member not in ('han_qian','nithish','ephraim'):
         raise ValueError('Unknown team member')
+    real_training = hq is None and nithish is None and ephraim is None
     x_train,y_train,x_val,y_val,train_dates,report=prepared
     if member=='han_qian':
         if hq is None:
@@ -46,6 +57,12 @@ def train_member(member, prepared, batch_id, tracking_uri, hq=None, nithish=None
         if ephraim is None:
             from src.train_ephraim import train_ephraim_models as ephraim
         results=ephraim(x_train,y_train,x_val,y_val,tracking_uri=tracking_uri,batch_name=batch_id)
-    return [{'run_id':row.get('run_id'),'model_uri':row.get('model_uri'),
+    runs = [{'run_id':row.get('run_id'),'model_uri':row.get('model_uri'),
              'model_name':row.get('name',row.get('version',row.get('model')))} for row in results]
+    if real_training:
+        if len(runs) != {'han_qian':2,'nithish':3,'ephraim':2}[member]:
+            raise ValueError('Unexpected number of model runs')
+        import mlflow
+        add_run_links(runs, tracking_uri, mlflow.MlflowClient(tracking_uri=tracking_uri))
+    return runs
 
