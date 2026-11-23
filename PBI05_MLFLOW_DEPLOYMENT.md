@@ -99,7 +99,7 @@ The roughly 491 runs held by the old PBI 05 server were not migrated (see `repor
 
 | Member | Experiment | Runs | Retrievable models |
 | --- | --- | ---: | --- |
-| Han Qian | `PBI06_HanQian` | 28 | model files on the runs (`MLmodel`, `python_model.pkl`, environment files) |
+| Han Qian | `PBI06_HanQian` | 28 | model files on the runs (checked on the two registered runs: `MLmodel`, `python_model.pkl`, environment files) |
 | Nithish | `PBI07_Nithish` | 3 | one logged model per run |
 | Ephraim | `PBI08_Ephraim` | 18 | logged models on the tuned runs; the baseline weights were kept locally |
 
