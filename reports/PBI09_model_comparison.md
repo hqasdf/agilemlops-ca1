@@ -120,6 +120,22 @@ The two registered models answer the two needs in section 2.
 
 Han Qian's and Nithish's runs log the same fit rows, calibration slice, validation window and seed, so Table A is a like-for-like comparison and the champion and runner-up are directly comparable. Ephraim's runs do not log fit rows or a calibration slice, so his F1, precision and recall are not ranked against Table A.
 
+### Runs excluded from the comparison
+
+On the evening of 23 November 2026 (18:07 to 18:09 SGT) Ephraim logged six runs to `PBI08_Ephraim`. All six are scored on the shared validation window (each confusion matrix sums to 144,978 orders, 19,740 of them fraud).
+
+| Run | F1 | Treatment |
+| --- | ---: | --- |
+| `dt_tuned_fit_on_validation` | 0.5643 | Excluded. Tagged `fit_on=validation`: the model is fitted on the same orders it is scored on, so the score is not a held-out result. No model file was uploaded. |
+| `rf_tuned_fit_on_validation` | 0.5441 | Excluded for the same reason. No model file was uploaded. |
+| `rf_tuned` | 0.5346 | Not ranked against Table A: fit rows and a calibration slice are not logged, and the cut-off is fixed at 0.5. Below the champion either way. |
+| `dt_tuned` | 0.5274 | Not ranked, same reason. |
+| `rf_baseline`, `dt_baseline` | 0.3906, 0.3663 | Baselines, below every registered candidate. |
+
+Recall near 0.80 with precision near 0.40 appears on Ephraim's runs that are not fitted on validation as well (`rf_tuned`: precision 0.4003, recall 0.8047). It comes from class weighting with a fixed 0.5 cut-off and does not by itself indicate leakage.
+
+To be ranked, an Ephraim model needs to be fitted on the training slice only (12 Nov to 17 Feb), have its cut-off set on the calibration slice (18 Feb to 14 Mar), be scored on the validation window, log the fit rows, and upload its model.
+
 ## 7. Registry record and load test
 
 ### Registry record
@@ -189,7 +205,17 @@ Run this whenever a member trains a new model version:
 5. If the team promotes it, register it as a new version of `fraud-detector` with the same tags, move the `champion` alias to it, and keep the old champion under the `runner-up` alias or an `archived` alias.
 6. Have a teammate other than the model's author load it by alias and score a sample before the alias move is treated as final.
 
-No new version has been trained since registration, so the repeat review has not yet been needed.
+### Repeat review recorded on 23 November 2026 (evening)
+
+| Item | Record |
+| --- | --- |
+| Trigger | New runs logged by Ephraim at 18:07 to 18:09 (see "Runs excluded from the comparison" in section 6) |
+| Reviewed by | Nithish, against every run in `PBI06_HanQian` (28), `PBI07_Nithish` (3) and `PBI08_Ephraim` (18), plus the registry |
+| Result | No run outranks the registered models under the same rules. The two highest new F1 scores are fitted on the validation window and are excluded. Ephraim's remaining runs score below the champion (0.5346 against 0.5435) |
+| Cross-check | Under a fixed 0.5 cut-off, CatBoost and Random Forest are also the top two families (CatBoost_Advanced 0.5464, RandomForest_Advanced 0.5461), and they lead on average precision (CatBoost 0.5250) and ROC-AUC (Random Forest 0.851). The gaps are within what one validation window can resolve |
+| Decision | `fraud-detector` version 1 stays `champion` and version 2 stays `runner-up` |
+| Registry check | Both aliases resolve to versions with status READY and their model files are present on the server |
+| Next review | When Ephraim re-runs on the training slice, or any member trains a new version |
 
 ## 9. Acceptance criteria
 
@@ -198,7 +224,7 @@ No new version has been trained since registration, so the repeat review has not
 | 1 | Review each member's first model in the Scrum meeting and record date, participants, comparable metrics, run links and rationale | Done. Supporting minutes or photo to be attached if the team has them | Sections 3 to 5 |
 | 2 | Register the top two as traceable MLflow versions and set the champion | Done | Section 7, screenshots 1 to 3 |
 | 3 | Show where the champion's version, source run, metrics and artifacts can be accessed | Done | Section 7, screenshots 2 and 4 to 6 |
-| 4 | Repeat the review when a new version is trained and record the decision | Procedure documented. No new version yet | Section 8 |
+| 4 | Repeat the review when a new version is trained and record the decision | Done for the 23 November runs, decision unchanged. Procedure documented for later versions | Section 8 |
 | 5 | Weekly Sprint and Scrum evidence: tasks, outputs, participation, pull-request reviews, owners, follow-up | Held by the team on the GitHub Project board and pull requests | Project board and pull-request links |
 
 ## 10. Limitations and open items
@@ -208,7 +234,7 @@ No new version has been trained since registration, so the repeat review has not
 - No agreed cost per missed fraud order or review capacity exists yet. The break-even in section 5 is illustrative. The team should replace it with real figures from Trust & Safety.
 - The load test was run by the models' author. A second member loading the champion would make the evidence stronger.
 - Run links work only while the shared server holds the runs. The server now stores metadata in RDS and artifacts in S3 (PBI 12), and runs while the AWS Learner Lab session is active. Run IDs are recorded above so the runs can be found again.
-- Ephraim's `rf_tuned` is a challenger. It needs a calibrated, like-for-like re-run and logged fit rows before it can be ranked against the registered models.
+- Ephraim's `rf_tuned` is a challenger. It needs a calibrated, like-for-like re-run, logged fit rows and an uploaded model before it can be ranked against the registered models.
 - Country is an input feature. Per-country flag rates should be reviewed before any operational use, and results should only prioritise human review.
 
 ## 11. Evidence
