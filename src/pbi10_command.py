@@ -38,12 +38,12 @@ def store_new_keys(path, keys):
         if os.path.exists(temporary): os.unlink(temporary)
 
 
-def execute_pipeline(connection, urls, batch_id, tracking_uri, sealed_keys, old_new_keys, ledger_path):
+def execute_pipeline(connection, urls, batch_id, tracking_uri, sealed_keys, old_new_keys, ledger_path, download_options=None):
     current=set()
     def prepare():
         if not sealed_keys or old_new_keys.intersection(sealed_keys):
             raise ValueError('A verified non-overlapping sealed-key manifest is required')
-        batch=prepare_downloaded_batch(urls)
+        batch=prepare_downloaded_batch(urls,**(download_options or {}))
         current.update(batch_order_keys(batch['cleaned']))
         if not current:
             raise ValueError('No accepted orders in the batch')

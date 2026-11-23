@@ -102,11 +102,12 @@ def main():
     import pymysql
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path, help="Directory containing the cleaned CSVs")
-    parser.add_argument("--host", required=True)
-    parser.add_argument("--port", type=int, default=3306)
-    parser.add_argument("--user", required=True)
-    parser.add_argument("--database", required=True)
-    parser.add_argument("--ssl-ca", required=True)
+    env = os.environ.get
+    parser.add_argument("--host", default=env("CA1_DB_HOST"), required=not env("CA1_DB_HOST"), help="default: CA1_DB_HOST")
+    parser.add_argument("--port", type=int, default=int(env("CA1_DB_PORT", "3306")), help="default: CA1_DB_PORT or 3306")
+    parser.add_argument("--user", default=env("CA1_DB_USER"), required=not env("CA1_DB_USER"), help="default: CA1_DB_USER")
+    parser.add_argument("--database", default=env("CA1_DB_NAME"), required=not env("CA1_DB_NAME"), help="default: CA1_DB_NAME")
+    parser.add_argument("--ssl-ca", default=env("CA1_DB_SSL_CA"), required=not env("CA1_DB_SSL_CA"), help="default: CA1_DB_SSL_CA")
     args = parser.parse_args()
     for table in TABLES:
         if not (args.directory / f"{table}_cleaned.csv").is_file():
