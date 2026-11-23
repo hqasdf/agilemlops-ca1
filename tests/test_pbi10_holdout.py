@@ -1,9 +1,18 @@
 import unittest
 import pandas as pd
-from src.pbi10_holdout import build_sealed_keys, exclude_sealed_keys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from src.pbi10_holdout import build_sealed_keys, exclude_sealed_keys, read_sealed_manifest
 
 
 class HoldoutTests(unittest.TestCase):
+    def test_manifest_requires_correct_hashes(self):
+        with TemporaryDirectory() as root:
+            path=Path(root)/'holdout.txt'
+            path.write_text('invalid\n')
+            with self.assertRaises(ValueError): read_sealed_manifest(path)
+            path.write_text('a'*64+'\n'+'b'*64+'\n')
+            self.assertEqual(len(read_sealed_manifest(path)),2)
     def test_sealed_historical_keys_excluded_new_dates_not_excluded(self):
         original=pd.DataFrame([{'country_code':'MY','order_id':'old','order_date':'2023-04-15'},
                                {'country_code':'MY','order_id':'train','order_date':'2023-02-01'}])

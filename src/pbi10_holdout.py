@@ -5,7 +5,21 @@ snapshot, not a database already containing new batches. Persist and verify the
 manifest separately before using it for training; this module does not do so.
 """
 import pandas as pd
+import re
+from pathlib import Path
 from src.data_access import _key_hash
+
+
+def read_sealed_manifest(path):
+    try:
+        lines=Path(path).read_text(encoding='utf-8').splitlines()
+    except OSError as exc:
+        raise ValueError('Sealed-key manifest unavailable') from exc
+    if not lines or any(not re.fullmatch(r'[0-9a-f]{64}', line) for line in lines):
+        raise ValueError('Sealed-key manifest is empty or invalid')
+    if len(set(lines)) != len(lines):
+        raise ValueError('Sealed-key manifest contains duplicates')
+    return frozenset(lines)
 
 
 def build_sealed_keys(historical_orders):
