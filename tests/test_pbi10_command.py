@@ -28,3 +28,11 @@ class PipelineCommandTests(unittest.TestCase):
         self.assertEqual(result['status'],'failed')
         load.assert_not_called()
 
+    def test_rejects_missing_manifest_before_database_write(self):
+        class Connection:
+            def close(self): pass
+        with patch('src.pbi10_command.prepare_downloaded_batch',return_value={'cleaned':'batch'}), patch('src.pbi10_command.batch_order_keys',return_value={'new'}), patch('src.pbi10_command.load_cleaned_batch') as load:
+            result=execute_pipeline(Connection(),{},'batch1','http://server',set(),set(),'ledger')
+        self.assertEqual(result['status'],'failed')
+        load.assert_not_called()
+

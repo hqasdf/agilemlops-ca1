@@ -41,8 +41,12 @@ def store_new_keys(path, keys):
 def execute_pipeline(connection, urls, batch_id, tracking_uri, sealed_keys, old_new_keys, ledger_path):
     current=set()
     def prepare():
+        if not sealed_keys or old_new_keys.intersection(sealed_keys):
+            raise ValueError('A verified non-overlapping sealed-key manifest is required')
         batch=prepare_downloaded_batch(urls)
         current.update(batch_order_keys(batch['cleaned']))
+        if not current:
+            raise ValueError('No accepted orders in the batch')
         if current.intersection(sealed_keys):
             raise ValueError('Incoming batch contains sealed historical order keys')
         return batch
