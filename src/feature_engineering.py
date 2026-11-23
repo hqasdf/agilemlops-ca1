@@ -183,6 +183,9 @@ def prepare_training_data(customers, orders, labels, include_test=False,
         "validation_last_date": str(val_rows["order_date"].max().date()),
         "train_validation_customers": len(train_customers.intersection(val_customers)),
     }
+    if new_order_keys is not None:
+        report['new_training_rows'] = sum(_key_hash(row.country_code, row.order_id) in new_order_keys for row in train_rows.itertuples())
+        report['new_validation_rows'] = sum(_key_hash(row.country_code, row.order_id) in new_order_keys for row in val_rows.itertuples())
     if include_training_dates:
         report["training_dates"] = train_rows["order_date"].copy()
     train_dates = train_rows["order_date"].copy()
