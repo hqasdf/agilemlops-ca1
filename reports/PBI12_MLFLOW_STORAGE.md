@@ -265,9 +265,30 @@ The CA1 specification asks for the investigation and design to be done through a
 
 - The server uses plain HTTP and has no login. Anyone with the URL can read and write. Do not log personal or sensitive data.
 - One Elastic Beanstalk instance and one RDS instance: the data is durable but the service is not highly available.
+- The inbound HTTP rule on the Elastic Beanstalk security group was limited to one IP address. After the lab was restarted on 23 November the server looked healthy in the console but could not be reached from other computers. The rule now allows all addresses so teammates and the interview demo can connect. Together with the missing login, this means the server is open to anyone who knows the URL.
 - A Learner Lab session ending can stop the environment or database. Check the URL and that the environment is Green when a session restarts. The RDS instance keeps its data while stopped.
 - The temporary CloudShell and personal-IP inbound rules on `mlflow-rds-sg` (4.3) were for setup and should be removed when administration is finished.
 
 ## 11. Evidence index
 
 All screenshots are in `pbi12_evidence/screenshots/`. Account ID, sign-in name and personal IP addresses were covered with black boxes. See `pbi12_evidence/README.md` for the mapping of each file to a criterion.
+
+## 12. Lab stop and start check (23 November 2026)
+
+The AWS Learner Lab session was ended and started again on 23 November, which stops the Elastic Beanstalk instance and the RDS database. This was a second proof of persistence, separate from the container replacement in section 7.
+
+| Check after the restart | Result |
+| --- | --- |
+| `/health` on the server URL | Responds `OK` |
+| Experiments `PBI06_HanQian` (28 runs), `PBI07_Nithish` (3 runs), `PBI08_Ephraim` and `pbi12-persistence-check` | All present with their runs and metrics |
+| Model files | Present on the registered runs and on the logged models |
+| Registered model `fraud-detector` | Versions 1 and 2 present, status READY, aliases `champion` and `runner-up` intact |
+
+**Recovery steps after a lab restart:**
+
+1. Start the lab and wait for the environment to turn Green in Elastic Beanstalk and for the RDS instance `mlflow-mysql` to show Available.
+2. Open the server URL followed by `/health`. If it does not respond from another computer, check the inbound HTTP source on the Elastic Beanstalk security group (see section 10).
+3. Open the Experiments page and confirm the runs are listed.
+4. Teammates keep the same `MLFLOW_TRACKING_URI`; the address does not change.
+
+Stopping and starting the lab does not terminate the environment or the database. Do not terminate `mlflow-pbi12` or `mlflow-mysql`.
