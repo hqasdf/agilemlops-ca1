@@ -155,7 +155,7 @@ The "Local MLflow run ID" values in the earlier tables refer to local runs and a
 
 `scripts/verify_pbi07_models.py` loads each of the three logged models from the shared server and prints its type and input schema. Run it from the repository root:
 
-```sh
+```powershell
 $env:MLFLOW_TRACKING_URI="http://mlflow-pbi12.eba-9bnrxizu.us-east-1.elasticbeanstalk.com"
 python scripts/verify_pbi07_models.py
 ```
