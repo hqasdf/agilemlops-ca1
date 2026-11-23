@@ -212,7 +212,7 @@ Run this whenever a member trains a new model version:
 | Trigger | New runs logged by Ephraim at 18:07 to 18:09 (see "Runs excluded from the comparison" in section 6) |
 | Reviewed by | Nithish, against every run in `PBI06_HanQian` (28), `PBI07_Nithish` (3) and `PBI08_Ephraim` (18), plus the registry |
 | Result | No run outranks the registered models under the same rules. The two highest new F1 scores are fitted on the validation window and are excluded. Ephraim's remaining runs score below the champion (0.5346 against 0.5435) |
-| Cross-check | Under a fixed 0.5 cut-off, CatBoost and Random Forest are also the top two families (CatBoost_Advanced 0.5464, RandomForest_Advanced 0.5461), and they lead on average precision (CatBoost 0.5250) and ROC-AUC (Random Forest 0.851). The gaps are within what one validation window can resolve |
+| Cross-check | Under a fixed 0.5 cut-off, CatBoost and Random Forest are also the top two families among the shared-protocol runs (CatBoost_Advanced 0.5464, RandomForest_Advanced 0.5461). Among Han Qian's and Nithish's runs they also lead on average precision (CatBoost 0.5250) and ROC-AUC (Random Forest 0.851). The F1 gaps are within what one validation window can resolve. Ephraim's `rf_tuned` has a higher AP (0.5390) and ROC-AUC (0.8583) than any of them, but its fit rows are not logged, so that ranking quality is unconfirmed until the re-run described above |
 | Decision | `fraud-detector` version 1 stays `champion` and version 2 stays `runner-up` |
 | Registry check | Both aliases resolve to versions with status READY and their model files are present on the server |
 | Next review | When Ephraim re-runs on the training slice, or any member trains a new version |
