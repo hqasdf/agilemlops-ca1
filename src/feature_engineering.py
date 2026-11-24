@@ -98,13 +98,16 @@ def prepare_features(orders, customers):
 
 
 def prepare_training_data(customers, orders, labels, include_test=False,
-                          include_training_dates=False, validation_start_date=None):
+                          include_training_dates=False, validation_start_date=None,
+                          sealed_order_keys=None, new_order_keys=None, current_batch_keys=None):
     """Safely join development records and return chronological train/validation data.
 
-    Sealed test-period orders are rejected before any feature join. This helper
-    never constructs or returns test features or labels. Whole dates stay in one
-    partition. The historical 70% development boundary may be supplied to
-    reproduce the saved validation period.
+    By default, reject all orders in the sealed period. The optional retraining
+    path requires a trusted sealed-key manifest and an allowlist of confirmed
+    new order keys; sealed orders are removed before any feature join. The
+    caller owns manifest provenance and must persist previously accepted new
+    keys. Whole dates stay in one partition. The historical validation boundary
+    can be supplied to reproduce the saved validation period.
     """
     _check_keys(customers, CUSTOMER_KEY, "customers")
     _check_keys(orders, ORDER_KEY, "orders")
@@ -115,7 +118,23 @@ def prepare_training_data(customers, orders, labels, include_test=False,
         raise ValueError("labels must contain is_fraud")
 
     order_dates = _dates(orders["order_date"], "order_date")
-    if (order_dates >= pd.Timestamp("2023-04-14")).any():
+    if sealed_order_keys is not None or new_order_keys is not None:
+        from src.data_access import _key_hash
+        if not sealed_order_keys or new_order_keys is None:
+            raise ValueError('A verified historical holdout and new-order allowlist are required')
+        if set(sealed_order_keys).intersection(new_order_keys):
+            raise ValueError('A new order cannot be a sealed historical order')
+        hashes = pd.Series([_key_hash(row.country_code, row.order_id) for row in orders.itertuples()], index=orders.index)
+        unknown = (order_dates >= pd.Timestamp('2023-04-14')) & ~hashes.isin(sealed_order_keys) & ~hashes.isin(new_order_keys)
+        if unknown.any():
+            raise ValueError('Later orders include keys outside the verified new-order allowlist')
+        allowed = ~hashes.isin(sealed_order_keys)
+        orders = orders.loc[allowed].copy()
+        order_dates = order_dates.loc[allowed]
+        later_allowed = hashes.loc[allowed].isin(new_order_keys)
+    else:
+        later_allowed = pd.Series(False, index=orders.index)
+    if ((order_dates >= pd.Timestamp("2023-04-14")) & ~later_allowed).any():
         raise ValueError("Input includes sealed test-period orders; use the development-only CSV loader")
     if include_test:
         raise ValueError("Test data are sealed and cannot be returned by this function")
@@ -164,6 +183,13 @@ def prepare_training_data(customers, orders, labels, include_test=False,
         "validation_last_date": str(val_rows["order_date"].max().date()),
         "train_validation_customers": len(train_customers.intersection(val_customers)),
     }
+    if new_order_keys is not None:
+        counted_keys = new_order_keys if current_batch_keys is None else current_batch_keys
+        if not set(counted_keys).issubset(new_order_keys):
+            raise ValueError('Current batch keys must belong to the new-order allowlist')
+        report['new_training_rows'] = sum(_key_hash(row.country_code, row.order_id) in counted_keys for row in train_rows.itertuples())
+        report['new_validation_rows'] = sum(_key_hash(row.country_code, row.order_id) in counted_keys for row in val_rows.itertuples())
+        report['new_training_indices'] = [int(row.Index) for row in train_rows.itertuples() if _key_hash(row.country_code, row.order_id) in counted_keys]
     if include_training_dates:
         report["training_dates"] = train_rows["order_date"].copy()
     train_dates = train_rows["order_date"].copy()
@@ -208,3 +234,5 @@ def training_sample_weights(y_train):
     if set(pd.Series(y_train).dropna().unique()) != {0, 1} or pd.isna(y_train).any():
         raise ValueError("Training labels must contain both binary classes")
     return compute_sample_weight(class_weight="balanced", y=y_train)
+
+
