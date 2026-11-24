@@ -13,12 +13,12 @@ def add_run_links(runs, tracking_uri, client):
 
 def choose_batch_validation_start(orders, labels, current_batch_keys):
     import pandas as pd
-    from src.data_access import _key_hash
+    from src.data_access import _key_hashes
     keys={'country_code','order_id'}
     if not current_batch_keys or not keys.issubset(orders.columns) or not keys.issubset(labels.columns):
         raise ValueError('Current order keys and labels are required')
     matched=orders.merge(labels[['country_code','order_id']],on=['country_code','order_id'],how='inner',validate='one_to_one')
-    mask=[_key_hash(row.country_code,row.order_id) in current_batch_keys for row in matched.itertuples()]
+    mask=_key_hashes(matched,'order_id').isin(current_batch_keys)
     dates=pd.to_datetime(matched.loc[mask,'order_date'],errors='coerce').dropna().sort_values().unique()
     if len(dates)<2:
         raise ValueError('Current labelled batch needs at least two distinct valid order dates for chronological validation')

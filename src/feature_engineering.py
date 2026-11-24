@@ -124,7 +124,8 @@ def prepare_training_data(customers, orders, labels, include_test=False,
             raise ValueError('A verified historical holdout and new-order allowlist are required')
         if set(sealed_order_keys).intersection(new_order_keys):
             raise ValueError('A new order cannot be a sealed historical order')
-        hashes = pd.Series([_key_hash(row.country_code, row.order_id) for row in orders.itertuples()], index=orders.index)
+        from src.data_access import _key_hashes
+        hashes = _key_hashes(orders, "order_id")
         unknown = (order_dates >= pd.Timestamp('2023-04-14')) & ~hashes.isin(sealed_order_keys) & ~hashes.isin(new_order_keys)
         if unknown.any():
             raise ValueError('Later orders include keys outside the verified new-order allowlist')
@@ -187,9 +188,12 @@ def prepare_training_data(customers, orders, labels, include_test=False,
         counted_keys = new_order_keys if current_batch_keys is None else current_batch_keys
         if not set(counted_keys).issubset(new_order_keys):
             raise ValueError('Current batch keys must belong to the new-order allowlist')
-        report['new_training_rows'] = sum(_key_hash(row.country_code, row.order_id) in counted_keys for row in train_rows.itertuples())
-        report['new_validation_rows'] = sum(_key_hash(row.country_code, row.order_id) in counted_keys for row in val_rows.itertuples())
-        report['new_training_indices'] = [int(row.Index) for row in train_rows.itertuples() if _key_hash(row.country_code, row.order_id) in counted_keys]
+        from src.data_access import _key_hashes
+        in_train = _key_hashes(train_rows, "order_id").isin(counted_keys)
+        in_val = _key_hashes(val_rows, "order_id").isin(counted_keys)
+        report['new_training_rows'] = int(in_train.sum())
+        report['new_validation_rows'] = int(in_val.sum())
+        report['new_training_indices'] = [int(index) for index in train_rows.index[in_train.to_numpy()]]
     if include_training_dates:
         report["training_dates"] = train_rows["order_date"].copy()
     train_dates = train_rows["order_date"].copy()

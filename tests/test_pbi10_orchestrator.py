@@ -21,6 +21,8 @@ class PipelineTests(unittest.TestCase):
         result=run_batch('batch1','https://mlflow.example',lambda:{},lambda x:{},lambda:'tables',train)
         self.assertEqual(result['status'],'failed')
         self.assertEqual(result['models']['nithish']['status'],'failed')
+        self.assertEqual(result['models']['nithish']['error_type'],'RuntimeError')
+        self.assertEqual(result['models']['nithish']['error'],'unavailable')
         self.assertEqual(result['models']['ephraim']['status'],'success')
 
     def test_unlogged_model_is_not_success(self):
