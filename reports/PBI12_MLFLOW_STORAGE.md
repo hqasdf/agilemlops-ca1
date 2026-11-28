@@ -120,7 +120,7 @@ The RDS instance uses security group `mlflow-rds-sg`. Its inbound rules allow My
 2. a temporary security group used by an AWS CloudShell session for database administration,
 3. one individual IP address used during setup (address hidden in the screenshots).
 
-Nothing else can connect. Screenshots: ss15 and ss16 (first edit), ss18 (rules at the end).
+Nothing else can connect. Screenshots: ss15 and ss16 (first edit), ss18 (rules at the end). Rules 2 and 3 were removed on 26 November 2026 (section 10), so the screenshots show the rules as they were during setup.
 
 Database administration was done from AWS CloudShell attached to the VPC. ss17 shows a successful connection that checks the server certificate (`--ssl-verify-server-cert`) and lists the `mlflow` database next to the system databases.
 
@@ -267,7 +267,7 @@ The CA1 specification asks for the investigation and design to be done through a
 - One Elastic Beanstalk instance and one RDS instance: the data is durable but the service is not highly available.
 - The inbound HTTP rule on the Elastic Beanstalk security group was limited to one IP address. After the lab was restarted on 23 November the server looked healthy in the console but could not be reached from other computers. The rule now allows all addresses so teammates and the interview demo can connect. Together with the missing login, this means the server is open to anyone who knows the URL.
 - A Learner Lab session ending can stop the environment or database. Check the URL and that the environment is Green when a session restarts. The RDS instance keeps its data while stopped.
-- The temporary CloudShell and personal-IP inbound rules on `mlflow-rds-sg` (4.3) were for setup and should be removed when administration is finished.
+- The temporary CloudShell and personal-IP inbound rules on `mlflow-rds-sg` (4.3) were removed on 26 November 2026 after setup was finished. Only the rule for the Elastic Beanstalk security group ("MLflow server access") remains, and the MLflow server still reads the database through it. A manual snapshot `mlflow-mysql-pre-submission-20261126` of the database was taken before the submission.
 
 ## 11. Evidence index
 
@@ -292,3 +292,33 @@ The AWS Learner Lab session was ended and started again on 23 November, which st
 4. Teammates keep the same `MLFLOW_TRACKING_URI`; the address does not change.
 
 Stopping and starting the lab does not terminate the environment or the database. Do not terminate `mlflow-pbi12` or `mlflow-mysql`.
+
+### 12.1 Second restart (26 November 2026): the app was not installed
+
+After the lab was started again on 26 November the environment looked normal in the console, but the server URL refused connections on port 80.
+
+| Observation | Meaning |
+| --- | --- |
+| Elastic Beanstalk showed the warning "Access denied while accessing Auto Scaling using role LabRole" | Known Learner Lab message. It can be ignored. |
+| Instance log from boot showed `403` when the instance downloaded the application bundle from S3 | The instance started before the lab role had working S3 access, so the app was never installed. |
+| Restart app server(s) and Deploy of `pbi12-mlflow-rds-s3-v1` changed nothing | The Elastic Beanstalk agent on the instance was not receiving commands. |
+| `sudo reboot` from an AWS Systems Manager Session Manager shell on the instance | Fixed it. `/health` answered `OK` after about 2 minutes. |
+
+The data was not affected. Experiments, runs and the `fraud-detector` aliases (`champion` on version 1, `runner-up` on version 2) were all present afterwards, and the model files of both versions downloaded through the server. This confirms that the data lives in RDS and S3, not on the instance.
+
+**If the URL refuses connections after a lab start:** reboot the instance (EC2 > Instances > `mlflow-pbi12` > Instance state > Reboot instance) and wait 2 minutes. Do not Rebuild or Terminate the environment, because that is not needed and would replace the instance.
+
+### 12.2 Preflight check before training or a demo
+
+`scripts/check_mlflow.py` is a read-only check that uses only the Python standard library:
+
+```
+python -m scripts.check_mlflow                       # uses MLFLOW_TRACKING_URI
+python -m scripts.check_mlflow http://<server-url>   # or pass the URL
+```
+
+It checks that `/health` answers, that every experiment lists its runs, and that `champion` and `runner-up` point to READY versions whose source run is FINISHED and whose model file downloads through the server (which proves the S3 path works, not only the database). Runs that share a name are listed as a note because they are told apart by start time. It prints the recovery steps above when the server does not answer.
+
+It only sends GET and search requests, so it cannot create or change an experiment, run, model or alias. `tests/test_check_mlflow.py` checks this against a local fake server, together with the pass and fail cases.
+
+The same requests were run from AWS CloudShell against the live server on 26 November and all passed.
