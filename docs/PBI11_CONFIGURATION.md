@@ -1,6 +1,6 @@
 # PBI 11 - external connection settings
 
-Database and MLflow settings are read at run time from environment variables or a settings file. No server name, password or URL is held in the Python source used by the pipeline (`pbi10_pipeline.py`, `src/pbi10_config.py`) or the PBI 04 loader (`src/pbi04_load.py`).
+Data links, database and MLflow settings are read at run time from a `.env` file or environment variables. No server name, password or URL is held in the Python source used by the pipeline (`pbi10_pipeline.py`, `src/pbi10_config.py`) or the PBI 04 loader (`src/pbi04_load.py`).
 
 ## Settings
 
@@ -17,16 +17,39 @@ Database and MLflow settings are read at run time from environment variables or 
 | `CA1_DOWNLOAD_TIMEOUT_SECONDS` | no (30) | Per-file download timeout |
 | `CA1_DOWNLOAD_MAX_BYTES` | no (250000000) | Maximum size of each downloaded CSV |
 
+## Run settings (change these for each batch)
+
+| Name | Required | Meaning |
+| --- | --- | --- |
+| `CA1_CUSTOMERS_URL` | yes | Public customers CSV link |
+| `CA1_ORDERS_URL` | yes | Public orders CSV link |
+| `CA1_LABELS_URL` | yes | Public labels CSV link |
+| `CA1_BATCH_ID` | no (timestamp) | Name used for the MLflow runs |
+| `CA1_SEALED_MANIFEST` | yes | Path to the sealed historical-order manifest |
+| `CA1_NEW_ORDER_LEDGER` | yes | Path to the new-order ledger |
+
+## Demonstration day
+
+Edit the three `_URL` lines in `.env`, save, then run:
+
+```powershell
+$env:PYTHONUTF8 = "1"
+python pbi10_pipeline.py
+```
+
+No Python file is edited. `python pbi10_validate.py` reads the same links and checks them without writing to the database.
+
+The order of priority is: command-line option, environment variable, settings file. The settings file is `--config`, else `CA1_CONFIG_FILE`, else `.env` beside `pbi10_pipeline.py`.
+
 ## Set up
 
-1. Copy `.env.example` to a path **outside the repository** (or to `.env`, which git ignores) and fill in your values.
-2. Point the tools at it with `--config PATH` or `CA1_CONFIG_FILE=PATH`, or export the variables in your shell.
-3. If a name is in both the file and the environment, the environment wins.
+1. Copy `.env.example` to `.env` beside `pbi10_pipeline.py` (git ignores it) and fill in your values. A file kept elsewhere also works.
+2. `.env` is read automatically. To use another file pass `--config PATH` or `CA1_CONFIG_FILE=PATH`.
+3. If a name is in both the file and the environment, the environment wins. Command-line options override both.
 
 ```bash
-python pbi10_pipeline.py --config ~/ca1.env \
-  --customers-url URL --orders-url URL --labels-url URL \
-  --batch-id BATCH --sealed-manifest manifest.txt --new-order-ledger ledger.txt
+python pbi10_pipeline.py                      # everything from .env
+python pbi10_pipeline.py --config ~/ca1.env   # everything from another file
 ```
 
 The PBI 04 loader reads the same names as defaults for `--host`, `--port`, `--user`, `--database` and `--ssl-ca`; the password comes from `CA1_DB_PASSWORD` or a hidden prompt.

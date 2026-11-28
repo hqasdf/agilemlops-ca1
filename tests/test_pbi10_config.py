@@ -4,7 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.pbi10_config import OPTIONAL, REQUIRED, ConfigError, read_config, read_config_file, open_database
+from src.pbi10_config import (OPTIONAL, REQUIRED, RUN_SETTINGS, ConfigError, find_config_file, read_config,
+                              read_config_file, read_run_settings, open_database)
 
 
 class ConfigTests(unittest.TestCase):
@@ -85,11 +86,28 @@ class ConfigTests(unittest.TestCase):
 
     def test_example_file_lists_every_setting_with_placeholders(self):
         example = read_config_file(Path(__file__).resolve().parents[1] / '.env.example')
-        self.assertEqual(set(example), set(REQUIRED) | set(OPTIONAL))
-        self.assertTrue(all(example.values()))
+        self.assertEqual(set(example), set(REQUIRED) | set(OPTIONAL) | set(RUN_SETTINGS))
+        self.assertTrue(all(value for name, value in example.items() if name != 'CA1_BATCH_ID'))
         for name in ('CA1_DB_HOST', 'CA1_DB_PASSWORD', 'MLFLOW_TRACKING_URI'):
             with self.subTest(name=name):
                 self.assertIn('your', example[name])
+
+    def test_run_settings_come_from_the_file_and_environment_wins(self):
+        path = Path(self.directory.name) / '.env'
+        path.write_text('CA1_CUSTOMERS_URL=https://a.example/c.csv\nCA1_ORDERS_URL=https://a.example/o.csv\n',
+                        encoding='utf-8')
+        settings = read_run_settings({'CA1_ORDERS_URL': 'https://b.example/o.csv'}, config_file=path)
+        self.assertEqual(settings['CA1_CUSTOMERS_URL'], 'https://a.example/c.csv')
+        self.assertEqual(settings['CA1_ORDERS_URL'], 'https://b.example/o.csv')
+        self.assertEqual(settings['CA1_LABELS_URL'], '')
+
+    def test_env_file_is_used_only_when_nothing_else_is_named(self):
+        path = Path(self.directory.name) / '.env'
+        self.assertIsNone(find_config_file(None, {}, default=path))
+        path.write_text('CA1_BATCH_ID=x\n', encoding='utf-8')
+        self.assertEqual(find_config_file(None, {}, default=path), path)
+        self.assertEqual(find_config_file(None, {'CA1_CONFIG_FILE': 'other.env'}, default=path), 'other.env')
+        self.assertEqual(find_config_file('named.env', {'CA1_CONFIG_FILE': 'other.env'}, default=path), 'named.env')
 
     def test_invalid_values_are_rejected(self):
         for key, value in (('CA1_DB_PORT', '65536'), ('CA1_DOWNLOAD_TIMEOUT_SECONDS', '0'),
