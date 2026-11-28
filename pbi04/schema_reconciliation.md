@@ -67,12 +67,15 @@ WHERE c.customer_id IS NULL;
 
 Counts are a historical baseline and can change when new batches are accepted. The SQL is provided for re-verification and was not executed during this documentation update.
 
-## Integration issue requiring resolution
+## Batch rows that do not fit the schema
 
-The current PBI 02 cleaning contract retains missing/invalid feature values as missing, including potentially order collection type, amount and date fields or customer numeric features. Several of those columns are NOT NULL in the PBI 04 schema. A cleaned batch can therefore be retained by the cleaner but fail database loading. Align the contracts by an agreed migration or an explicit documented reject/quarantine policy before the integrated new-batch test. Do not silently substitute values or alter the live schema without review. Integer range and text length limits also need validation against incoming data.
+The PBI 02 cleaner keeps missing or invalid feature values as missing, while several columns here are NOT NULL. The PBI 10 pipeline now checks each cleaned batch before loading it (`src/pbi10_db_contract.py`): missing required columns, nulls in NOT NULL columns and over-length text stop the whole batch with a message naming the table, column and count. Nothing is substituted and no part of that batch is loaded. Loading runs in strict SQL mode inside one transaction (`src/pbi10_load.py`), so numeric or date values the database rejects also roll the batch back.
 
-## Open review and evidence
+The current loader is `src/pbi04_load.py`. `pbi04/load_cleaned.py` is the original 17 November version, kept as a record of the initial import.
 
-- Obtain teammate review of schema, keys, reconciliation and integration issue.
-- Compare live DDL and current counts with the versioned schema and this baseline.
-- Verify the authorised new batch and historical/new records through PBI 10 training and analytics (issue #27); this report is not that verification.
+## Status at 28 November
+
+- The figures above rest on the 17 November live verification and the 22 November recount of the cleaned files. The live database was not queried again for this update.
+- Network access has changed since the 17 November note; check the current access rules in the console before connecting.
+- The owner reports that teammates reviewed the schema and reconciliation. No written review is attached to this document.
+- The cause of the unmatched records is still unknown. They are kept in the database and excluded wherever a query or training step joins the tables.
