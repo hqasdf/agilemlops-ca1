@@ -1,0 +1,8 @@
+PBI 12 persistence test 2 - output of: python -m scripts.verify_pbi12_persistence log
+Run on 22 Nov 2026 before the container replacement. Matching screenshots: ss29 (top), ss30, ss31.
+
+Model name: pbi12-persistence-model, version 2
+Created version '2' of model 'pbi12-persistence-model'.
+View run pbi12-real-model-before-replacement at: http://mlflow-pbi12.eba-9bnrxizu.us-east-1.elasticbeanstalk.com/#/experiments/1/runs/1223ed104ad249af965e665cd3072770
+View experiment at: http://mlflow-pbi12.eba-9bnrxizu.us-east-1.elasticbeanstalk.com/#/experiments/1
+LOGGED run 1223ed104ad249af965e665cd3072770 model version 2 -> artifacts\pbi12_evidence.json
