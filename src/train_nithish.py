@@ -29,26 +29,31 @@ import mlflow.sklearn
 import numpy as np
 import pandas as pd
 import sklearn
-from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (average_precision_score, confusion_matrix,
                              precision_recall_curve, roc_auc_score)
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.preprocessing import FunctionTransformer
+from scipy import sparse
 
-from src.feature_engineering import CUSTOMER_KEY, INPUT_FEATURES, ORDER_KEY, prepare_training_data
+from src.feature_engineering import (
+    CATEGORICAL_FEATURES, DATE_FEATURES, INPUT_FEATURES, NUMERIC_FEATURES,
+    build_preprocessor, prepare_training_data,
+)
+from src.data_access import VALIDATION_START
+from src.mlflow_remote import ensure_server_reachable
+from src.model_evaluation import best_f1_threshold, recent_training_window as _recent_training_window
 
 MEMBER = "nith-ish22"
 MEMBER_NAME = "Nithish"
 EXPERIMENT = "PBI07_Nithish"
 SEED = 42
 
-AMOUNTS = ["order_value", "num_items_ordered", "days_since_first_order"]   # skewed, non-negative
-CALENDAR = ["order_weekday", "order_month"]
-CATEGORIES = ["country_code", "collect_type", "payment_method"]
-FEATURES = INPUT_FEATURES + ["days_since_first_order"]  # team's 7 order features + 1 customer-history feature
+AMOUNTS = NUMERIC_FEATURES
+CALENDAR = DATE_FEATURES
+CATEGORIES = CATEGORICAL_FEATURES
+FEATURES = INPUT_FEATURES
 TUNING_WINDOW = 0.20                                  # latest whole dates covering about 20% of training rows
 REQUIREMENTS = [f"scikit-learn=={sklearn.__version__}", f"pandas=={pd.__version__}",
                 f"numpy=={np.__version__}", f"mlflow=={mlflow.__version__}"]
@@ -57,43 +62,11 @@ logging.getLogger("mlflow.sklearn").setLevel(logging.ERROR)   # hide the routine
 
 # --------------------------------------------------------------------------- features
 
-def add_customer_features(features, customers, orders, labels):
-    """Add time since first recorded order and tidy payment-method casing.
-
-    This is a customer-history proxy, not verified account-registration age:
-    `first_order_datetime` records first purchase history. It is used only when
-    it is on or before the order date; otherwise it is unknown. Undated
-    customer aggregates remain excluded because they may contain future data.
-    """
-    table = labels.reset_index(drop=True)[ORDER_KEY + ["customer_id"]]
-    table = table.merge(orders[ORDER_KEY + ["order_date", "order_value"]], on=ORDER_KEY,
-                        how="left", validate="one_to_one")
-    table = table.merge(customers[CUSTOMER_KEY + ["first_order_datetime"]], on=CUSTOMER_KEY,
-                        how="left", validate="many_to_one")
-    table = table.loc[features.index]
-    # Guard: the rows must be the same orders the team split produced.
-    same = np.isclose(table["order_value"].astype(float), features["order_value"], equal_nan=True)
-    if not same.all():
-        raise ValueError("Feature rows do not line up with the cleaned labels")
-    days_since_first_order = (pd.to_datetime(table["order_date"]).dt.normalize()
-                              - pd.to_datetime(table["first_order_datetime"]).dt.normalize()).dt.days.astype(float)
-    result = features.copy()
-    result["days_since_first_order"] = days_since_first_order.where(days_since_first_order >= 0)
-    result["payment_method"] = result["payment_method"].str.lower()   # "on Delivery" == "on delivery"
-    return result[FEATURES]
-
-
 def prepare_data(customers, orders, labels):
-    """Team chronological split (70/15/15) plus customer-history proxy.
-
-    Optional flags were added to the shared PBI 03 helper without changing its
-    default seven-value return for existing callers. Test features/labels are
-    deliberately not materialised by this training path.
-    """
+    """Return the shared eight features and chronological PBI 03 split."""
     x_train, y_train, x_val, y_val, _, _, report, train_dates = prepare_training_data(
-        customers, orders, labels, include_test=False, include_training_dates=True)
-    x_train = add_customer_features(x_train, customers, orders, labels)
-    x_val = add_customer_features(x_val, customers, orders, labels)
+        customers, orders, labels, include_test=False, include_training_dates=True,
+        validation_start_date=VALIDATION_START)
     return x_train, y_train, x_val, y_val, train_dates, report
 
 
@@ -101,35 +74,25 @@ def prepare_data(customers, orders, labels):
 
 def logistic_pipeline():
     """Scorecard-style model: every feature adds or removes risk independently."""
-    amounts = Pipeline([("impute", SimpleImputer(strategy="median")),
-                        ("log", FunctionTransformer(np.log1p, feature_names_out="one-to-one")),
-                        ("scale", StandardScaler())])
-    labels = Pipeline([("impute", SimpleImputer(strategy="constant", fill_value="missing")),
-                       ("onehot", OneHotEncoder(handle_unknown="ignore"))])
-    prepare = ColumnTransformer([("amounts", amounts, AMOUNTS),
-                                 ("labels", labels, CALENDAR + CATEGORIES)],
-                                verbose_feature_names_out=False)
     model = LogisticRegression(max_iter=300, class_weight="balanced", random_state=SEED)
-    return Pipeline([("prepare", prepare), ("model", model)])
+    return Pipeline([("prepare", build_preprocessor()), ("model", model)])
+
+
+def _dense_if_sparse(values):
+    """Change matrix storage only for estimators that require dense arrays."""
+    return values.toarray() if sparse.issparse(values) else values
 
 
 def boosting_pipeline():
-    """Small boosted trees: learns curves and feature combinations.
-
-    Missing values and categories are handled natively (no imputing or one-hot).
-    Business rule built in: more time since first recorded order can never
-    increase the risk score.
-    """
-    encode = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan,
-                            encoded_missing_value=np.nan)
-    prepare = ColumnTransformer([("categories", encode, CATEGORIES),
-                                 ("numbers", "passthrough", AMOUNTS + CALENDAR)],
-                                verbose_feature_names_out=False).set_output(transform="pandas")
+    """Shared encoded inputs; dense conversion is storage adaptation for HGB."""
     model = HistGradientBoostingClassifier(
         max_iter=150, learning_rate=0.06, max_leaf_nodes=15, min_samples_leaf=100,
-        categorical_features=CATEGORIES, monotonic_cst={"days_since_first_order": -1},
         class_weight="balanced", early_stopping=False, random_state=SEED)
-    return Pipeline([("prepare", prepare), ("model", model)])
+    return Pipeline([
+        ("prepare", build_preprocessor()),
+        ("dense", FunctionTransformer(_dense_if_sparse, feature_names_out="one-to-one")),
+        ("model", model),
+    ])
 
 
 VERSIONS = {
@@ -149,31 +112,12 @@ VERSIONS = {
 
 def recent_training_window(train_dates, share=TUNING_WINDOW):
     """Boolean mask of the latest whole dates in training (about `share` of rows)."""
-    if not 0 < share < 1 or len(train_dates) < 2 or train_dates.isna().any():
-        raise ValueError("Threshold calibration needs at least two valid training dates and a share between 0 and 1")
-    start = train_dates.sort_values().iloc[int(len(train_dates) * (1 - share))]
-    recent = train_dates >= start
-    if recent.all() or not recent.any():
-        raise ValueError("Training needs at least two different order dates")
-    return recent
+    return _recent_training_window(train_dates, share)
 
 
 def best_f1_cutoff(y, scores):
     """Cut-off with the highest fraud F1 (the team's ranking metric)."""
-    y = np.asarray(y)
-    scores = np.asarray(scores, dtype=float)
-    if y.ndim != 1 or scores.ndim != 1 or len(y) != len(scores) or len(y) == 0:
-        raise ValueError("Threshold labels and scores must be non-empty one-dimensional arrays of equal length")
-    if not np.isin(y, [0, 1]).all() or set(np.unique(y)) != {0, 1} or not np.isfinite(scores).all():
-        raise ValueError("Threshold calibration requires both binary classes and finite scores")
-    if ((scores < 0) | (scores > 1)).any():
-        raise ValueError("Threshold calibration scores must be probabilities between 0 and 1")
-    y = y.astype(int)
-    precision, recall, cutoffs = precision_recall_curve(y, scores)
-    if len(cutoffs) == 0:
-        raise ValueError("Threshold calibration produced no candidate cut-offs")
-    f1 = 2 * precision[:-1] * recall[:-1] / np.maximum(precision[:-1] + recall[:-1], 1e-12)
-    return float(cutoffs[int(np.argmax(f1))])
+    return best_f1_threshold(y, scores)
 
 
 def choose_cutoff(model, x_train, y_train, train_dates):
@@ -188,6 +132,7 @@ def _set_tracking(tracking_uri, experiment_name):
     local = Path("artifacts/mlflow").resolve()
     uri = tracking_uri or os.environ.get("MLFLOW_TRACKING_URI")
     if uri:
+        ensure_server_reachable(uri)  # remote server: fail early with a clear message
         mlflow.set_tracking_uri(uri)
     else:                                              # same local store layout as PBI 06
         local.mkdir(parents=True, exist_ok=True)
@@ -223,11 +168,11 @@ def _figures(y_val, scores, cutoff, metrics, title):
 
 
 def _log_run(version, spec, model, cutoff, metrics, x_val, y_val, scores, report, seconds, batch_name,
-             model_fit_rows, threshold_calibration_rows, train_dates):
+             model_fit_rows, threshold_calibration_rows, train_dates, calibration_mask):
     with mlflow.start_run(run_name=f"{MEMBER}-{batch_name}-{version}") as run:
         mlflow.set_tags({"member": MEMBER, "member_name": MEMBER_NAME, "pbi": "07", "model_version": version,
                          "model_name": type(model[-1]).__name__, "dataset": "validation",
-                         "split": "outer chronological 70/15/15; inner fit/calibration 80/20; test untouched",
+                         "split": "chronological validation; calibration rows are held out from model fitting",
                          "change_from_previous": spec["change"]})
         mlflow.log_params({
             "threshold": cutoff, "batch_name": batch_name, "seed": SEED,
@@ -237,19 +182,24 @@ def _log_run(version, spec, model, cutoff, metrics, x_val, y_val, scores, report
             "train_rows": report["training_rows"], "validation_rows": report["validation_rows"],
             "model_fit_rows": model_fit_rows,
             "threshold_calibration_rows": threshold_calibration_rows,
-            "threshold_calibration_start": str(train_dates.loc[recent_training_window(train_dates)].min().date()),
-            "threshold_calibration_end": str(train_dates.loc[recent_training_window(train_dates)].max().date()),
+            "threshold_calibration_start": str(train_dates.loc[calibration_mask].min().date()),
+            "threshold_calibration_end": str(train_dates.loc[calibration_mask].max().date()),
+            "calibration_note": "historical calibration excludes the current batch and may predate fitted current rows" if report.get('new_training_rows') else "latest training dates reserved for calibration",
             "train_first_date": report["train_first_date"], "train_last_date": report["train_last_date"],
             "validation_first_date": report["validation_first_date"],
             "validation_last_date": report["validation_last_date"]})
         mlflow.log_params({"model__" + key: str(value) for key, value in model[-1].get_params().items()})
         mlflow.log_params({"preprocess__" + key: str(value)[:250]
                            for key, value in model[0].get_params(deep=True).items()})
-        mlflow.log_param("preprocessing_summary", (
-            "median imputation, log1p, standard scaling, one-hot encoding"
-            if isinstance(model[-1], LogisticRegression) else
-            "ordinal category encoding, native missing values, monotonic -1 on days_since_first_order"
-        ))
+        mlflow.log_param(
+            "preprocessing_summary",
+            "shared PBI 03 median imputation, log1p, robust scaling, one-hot encoding",
+        )
+        mlflow.log_param("preprocessing_schema", ", ".join(FEATURES))
+        mlflow.log_param(
+            "histgradientboosting_adaptation",
+            "shared one-hot inputs; removed native categorical and monotonic constraints",
+        )
         mlflow.log_metrics({**metrics, "training_seconds": seconds})
         curve, confusion = _figures(y_val, scores, cutoff, metrics, version)
         mlflow.log_figure(curve, "precision_recall.png")
@@ -258,7 +208,10 @@ def _log_run(version, spec, model, cutoff, metrics, x_val, y_val, scores, report
         plt.close(confusion)
         mlflow.log_dict({"threshold": cutoff, "threshold_rule": spec["threshold_rule"],
                          "model_version": version, "features_in_order": FEATURES,
-                         "first_order_feature_semantics": "days since first recorded order; not verified account age"},
+                         "first_order_feature_semantics": (
+                             "order date minus first recorded order date; missing when unknown or future; "
+                             "source must represent point-in-time history"
+                         )},
                         "inference.json")
         # One artifact = preprocessing + model. Load it and call predict_proba on FEATURES.
         # Our own trusted model, so plain pickling is fine (same trust as the team's joblib files).
@@ -303,7 +256,8 @@ def evaluate(model, x_val, y_val, cutoff):
 
 
 def train_nithish_models(customers, orders, labels, tracking_uri=None, experiment_name=EXPERIMENT,
-                         batch_name="base", versions=None, log=True):
+                         batch_name="base", versions=None, log=True, prepared_data=None,
+                         current_batch_indices=None):
     """Clean tables in, three trained versions out. Call this from the PBI 10 pipeline.
 
     customers, orders, labels: retained outputs of the PBI 02 cleaners.
@@ -317,11 +271,18 @@ def train_nithish_models(customers, orders, labels, tracking_uri=None, experimen
     if unknown:
         raise ValueError(f"Unknown model version(s): {unknown}. Choose from {list(VERSIONS)}")
 
-    x_train, y_train, x_val, y_val, train_dates, report = prepare_data(customers, orders, labels)
+    x_train, y_train, x_val, y_val, train_dates, report = (prepare_data(customers, orders, labels)
+                                                         if prepared_data is None else prepared_data)
     if log:
         _set_tracking(tracking_uri, experiment_name)
-    recent = recent_training_window(train_dates)
+    if current_batch_indices is None:
+        recent = recent_training_window(train_dates)
+    else:
+        from src.model_evaluation import historical_calibration_mask
+        recent = historical_calibration_mask(train_dates,current_batch_indices)
     fit_rows = ~recent
+    if current_batch_indices is not None and not x_train.loc[fit_rows].index.isin(current_batch_indices).any():
+        raise ValueError('No current-batch rows are available for Nithish model fitting')
     fitted, cutoffs, results = {}, {}, []
     for version in requested_versions:
         spec = VERSIONS[version]
@@ -330,7 +291,7 @@ def train_nithish_models(customers, orders, labels, tracking_uri=None, experimen
         if build not in fitted:                          # versions of a model family share one fitted model
             fitted[build] = build().fit(x_train.loc[fit_rows], y_train.loc[fit_rows])
         if spec["tune_cutoff"] and build not in cutoffs:
-            cutoffs[build] = choose_cutoff(fitted[build], x_train, y_train, train_dates)
+            cutoffs[build] = best_f1_cutoff(y_train.loc[recent],fitted[build].predict_proba(x_train.loc[recent])[:,1])
         seconds = perf_counter() - start
         model = fitted[build]
         cutoff = cutoffs[build] if spec["tune_cutoff"] else 0.5
@@ -342,7 +303,7 @@ def train_nithish_models(customers, orders, labels, tracking_uri=None, experimen
                   "tracking_uri": mlflow.get_tracking_uri() if log else None}
         if log:
             run_id = _log_run(version, spec, model, cutoff, metrics, x_val, y_val, scores,
-                              report, seconds, batch_name, int(fit_rows.sum()), int(recent.sum()), train_dates)
+                              report, seconds, batch_name, int(fit_rows.sum()), int(recent.sum()), train_dates, recent)
             result.update({"run_id": run_id, "model_uri": f"runs:/{run_id}/model"})
         results.append(result)
     return results
@@ -358,3 +319,5 @@ if __name__ == "__main__":
         m = row["metrics"]
         print(f"{row['version']:28s} F1 {m['f1']:.4f}  precision {m['precision']:.4f}  "
               f"recall {m['recall']:.4f}  AP {m['average_precision']:.4f}  run {row.get('run_id')}")
+
+

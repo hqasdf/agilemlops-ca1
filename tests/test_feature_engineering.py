@@ -33,14 +33,17 @@ class FeatureTests(unittest.TestCase):
             self.customers, self.orders, self.labels
         )
         self.assertEqual(report["labels_without_orders"], 1)
-        self.assertEqual((len(x_train), len(x_val), len(x_test)), (14, 3, 3))
+        self.assertEqual((len(x_train), len(x_val)), (14, 6))
+        self.assertEqual(INPUT_FEATURES, [
+            "order_value", "num_items_ordered", "order_weekday", "order_month",
+            "country_code", "collect_type", "payment_method", "days_since_first_order",
+        ])
+        self.assertIsNone(x_test)
+        self.assertIsNone(y_test)
         self.assertLess(report["train_last_date"], report["validation_first_date"])
-        self.assertLess(report["validation_last_date"], report["test_first_date"])
-        for features in (x_train, x_val, x_test):
+        for features in (x_train, x_val):
             self.assertEqual(list(features.columns), INPUT_FEATURES)
         self.assertTrue(x_train.index.intersection(x_val.index).empty)
-        self.assertTrue(x_train.index.intersection(x_test.index).empty)
-        self.assertTrue(x_val.index.intersection(x_test.index).empty)
         for forbidden in ["refund_value", "is_fraud", "order_id", "customer_id",
                           "first_order_datetime", "num_refund_orders_last_50days"]:
             self.assertNotIn(forbidden, x_train.columns)
@@ -49,10 +52,11 @@ class FeatureTests(unittest.TestCase):
         changed_customers = self.customers.copy()
         changed_customers["num_refund_orders_last_50days"] = 999999
         repeated = prepare_training_data(changed_customers, changed_orders, self.labels)
-        for index, features in [(0, x_train), (2, x_val), (4, x_test)]:
+        for index, features in [(0, x_train), (2, x_val)]:
             pd.testing.assert_frame_equal(features, repeated[index])
         self.assertEqual(report, repeated[6])
         self.assertNotIn("test_fraud", report)
+        self.assertNotIn("test_rows", report)
         duplicate = pd.concat([self.orders, self.orders.iloc[[0]]], ignore_index=True)
         with self.assertRaisesRegex(ValueError, "duplicate composite keys"):
             prepare_training_data(self.customers, duplicate, self.labels)
@@ -65,12 +69,20 @@ class FeatureTests(unittest.TestCase):
         orders.loc[orders.order_id == "14", "order_date"] = orders.loc[orders.order_id == "13", "order_date"].iloc[0]
         x_train, _, x_val, _, x_test, _, report = prepare_training_data(self.customers, orders, self.labels)
         self.assertLess(report["train_last_date"], report["validation_first_date"])
-        self.assertLess(report["validation_last_date"], report["test_first_date"])
-        self.assertEqual(len(x_train) + len(x_val) + len(x_test), 20)
+        self.assertIsNone(x_test)
+        self.assertEqual(len(x_train) + len(x_val), 20)
         # Both rows from the boundary date must belong to the same partition.
         row_13 = self.labels.index[self.labels.order_id == "13"][0]
         row_14 = self.labels.index[self.labels.order_id == "14"][0]
-        self.assertTrue(any(row_13 in part.index and row_14 in part.index for part in (x_train, x_val, x_test)))
+        self.assertTrue(any(row_13 in part.index and row_14 in part.index for part in (x_train, x_val)))
+
+    def test_sealed_test_period_is_rejected_before_joining_labels(self):
+        test_order = order(order_id="sealed", order_date="2023-04-14")
+        orders = clean_orders(pd.concat([self.orders, pd.DataFrame([test_order])], ignore_index=True))[0]
+        test_label = label(order_id="sealed", is_fraud="must-not-be-read")
+        labels = pd.concat([self.labels, pd.DataFrame([test_label])], ignore_index=True)
+        with self.assertRaisesRegex(ValueError, "sealed test-period"):
+            prepare_training_data(self.customers, orders, labels)
 
     def test_unseen_missing_train_only_fit_and_artifact(self):
         x_train, _, x_val, _, x_test, _, _ = prepare_training_data(self.customers, self.orders, self.labels)
@@ -78,7 +90,7 @@ class FeatureTests(unittest.TestCase):
         train_matrix = transformer.transform(x_train)
         val_matrix = transformer.transform(x_val)
         self.assertEqual(train_matrix.shape[1], val_matrix.shape[1])
-        self.assertEqual(list(x_test.columns), list(x_train.columns))
+        self.assertIsNone(x_test)
         train_values = train_matrix.toarray() if sparse.issparse(train_matrix) else train_matrix
         val_values = val_matrix.toarray() if sparse.issparse(val_matrix) else val_matrix
         self.assertTrue(np.isfinite(train_values).all())
@@ -100,11 +112,25 @@ class FeatureTests(unittest.TestCase):
         missing_dates.loc[0, "order_date"] = pd.NaT
         *_, report = prepare_training_data(self.customers, missing_dates, self.labels)
         self.assertEqual(report["matched_orders_without_dates"], 1)
-        self.assertTrue(np.isnan(prepare_features(missing_dates).iloc[0]["order_weekday"]))
-        invalid = self.orders.copy()
+        order_customer = self.orders.merge(
+            self.labels[["country_code", "order_id", "customer_id"]],
+            on=["country_code", "order_id"], validate="one_to_one",
+        )
+        order_customer.loc[0, "order_date"] = pd.NaT
+        self.assertTrue(np.isnan(prepare_features(order_customer, self.customers).iloc[0]["order_weekday"]))
+        future_customers = self.customers.copy()
+        future_customers.loc[0, "first_order_datetime"] = pd.Timestamp("2024-01-01")
+        safe_features = prepare_features(order_customer.iloc[[1]], future_customers)
+        self.assertTrue(pd.isna(safe_features.iloc[0]["days_since_first_order"]))
+        self.assertEqual(safe_features.loc[safe_features.index[0], "payment_method"], "cash")
+        invalid = order_customer.copy()
         invalid.loc[0, "order_value"] = -1
         with self.assertRaisesRegex(ValueError, "nonnegative"):
-            prepare_features(invalid)
+            prepare_features(invalid, self.customers)
+
+    def test_customer_identity_is_required_for_order_feature_join(self):
+        with self.assertRaisesRegex(ValueError, "customer_id"):
+            prepare_features(self.orders.iloc[[0]], self.customers)
         same_date = self.orders.copy()
         same_date["order_date"] = pd.Timestamp("2023-01-01")
         with self.assertRaisesRegex(ValueError, "empty set"):
@@ -115,7 +141,7 @@ class FeatureTests(unittest.TestCase):
         labels.loc[labels.order_id == "0", "customer_id"] = "unknown"
         *_, report = prepare_training_data(self.customers, self.orders, labels)
         self.assertEqual(report["labels_without_customers"], 1)
-        self.assertEqual(report["training_rows"] + report["validation_rows"] + report["test_rows"], 20)
+        self.assertEqual(report["training_rows"] + report["validation_rows"], 20)
 
 
 if __name__ == "__main__":

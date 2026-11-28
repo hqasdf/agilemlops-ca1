@@ -1,69 +1,58 @@
-# PBI 03 — feature transformation record
+# PBI 03 — shared feature transformations
 
-Target: `is_fraud` (0 = non-fraud, 1 = fraud), from cleaned labels. One example is one labeled order. The code is in `src/feature_engineering.py`; apply PBI 02 cleaning before using it. The retained cleaner outputs are the only inputs to the shared interface.
+All three model-training PBIs use `src/feature_engineering.py`. Clean source tables with PBI 02 first. The main interface returns chronological training and validation features, labels, metadata, and no test feature/label arrays.
 
-| Input / derived columns | Decision and rationale | Code |
-| --- | --- | --- |
-| `country_code`, `order_id`, `customer_id` | Normalize/validate in PBI 02. Join labels to orders on country + order ID (one-to-one) and to customers on country + customer ID (many-to-one). IDs are excluded from features. Country is retained as a categorical feature, assuming it is known when the order is placed. | `prepare_training_data`, `prepare_features` |
-| `order_value`, `num_items_ordered` | Numeric inputs known at checkout, subject to confirming the operational decision time. Reject negative/nonfinite inputs at this interface; use the training median for missing values, `log1p` for skew, then training-fitted robust scaling. Do not clip or drop valid extremes. | `prepare_features`, `fit_preprocessor` |
-| `order_date` | Derive weekday (Monday = 0) and month. The raw date is used to split and is not passed to the model. Medians are learned from training for missing derived values at inference; undated records are excluded from the split and counted. These calendar features assume order date is known at prediction. | `prepare_training_data`, `prepare_features`, `fit_preprocessor` |
-| `country_code`, `collect_type`, `payment_method` | Missing values get a distinct `__missing__` category; one-hot encoding is fitted only on training. Unseen categories produce all zeros for that field. Verify collection and payment method are known before review. | `prepare_features`, `fit_preprocessor` |
-| `refund_value`, `is_fraud` | Exclude refund value because it may occur after prediction; the target is never an input feature. | `prepare_features` |
-| All customer fields, including `first_order_datetime`, `mobile_verified` and 50-day aggregates | Exclude: this file is a snapshot without timestamps proving historical values were available per order. Even account-age features could leak if snapshot provenance is unknown. Joins are checked for coverage only. | `prepare_training_data`, `prepare_features` |
-| Class imbalance | `training_sample_weights(y_train)` provides balanced weights using training labels only, for a later compatible estimator. There is no resampling, and validation and test keep their natural class distributions. Do not also apply separate class weights without deliberate review. Assess precision, recall and PR performance in the later model PBIs. | `training_sample_weights` |
+## Shared eight-feature schema
 
-## Reproducible split and base-data result
+The raw model-input columns and their order are fixed:
 
-Sort matched labeled orders by date. The dates at the 70th and 85th percentile rows start validation and test respectively. All orders on the same date remain together, so proportions are approximate. A split that produces an empty set raises an error. Missing/unmatched orders and matched orders with missing dates are reported and excluded; missing customer matches are reported but retained because no customer values enter the model.
+1. `order_value`
+2. `num_items_ordered`
+3. `order_weekday`
+4. `order_month`
+5. `country_code`
+6. `collect_type`
+7. `payment_method`
+8. `days_since_first_order`
 
-On the supplied data, 444 label rows had no order, 14 lacked a customer match and no matched orders lacked a date:
+Identifiers and `is_fraud` are join/target fields, never model inputs. `refund_value` and undated customer aggregates are excluded because they may reveal post-order outcomes or future customer history.
 
-| Set | Rows | Share | Order dates |
-| --- | ---: | ---: | --- |
-| Training | 660,773 | 69.56% | 2022-11-12 to 2023-03-14 |
-| Validation | 144,978 | 15.26% | 2023-03-15 to 2023-04-13 |
-| Test | 144,123 | 15.17% | 2023-04-14 to 2023-05-11 |
+`prepare_training_data(customers, orders, labels)` validates unique composite keys, joins labels to orders one-to-one on `(country_code, order_id)`, and joins customer history many-to-one on `(country_code, customer_id)`. It rejects sealed-period orders before the feature join. Whole order dates remain in a single partition. The frozen validation boundary is 15 March 2023; training ends 14 March 2023 and validation ends 13 April 2023. Test features and labels are not returned or summarized.
 
-Fit preprocessing and model parameters on training only. Use validation for model comparison, tuning and champion selection. Preserve test labels and the prepared test feature frame without inspection, fitted preprocessing or model evaluation until the final champion is selected; then use the already fitted preprocessing and chosen model once for final evaluation. The split report deliberately does not summarize test labels or metrics. PBI 02 validates the source labels as part of cleaning before the split.
+`prepare_features(orders, customers)` is the inference-side builder. It requires each order row to include a customer ID obtained independently of the fraud-label file. The current order CSV does not have `customer_id`; the training labels provide that relation for historical examples. PBI 10 must supply a trusted order-to-customer mapping at scoring time. If it cannot, `days_since_first_order` is not available for prediction and the eight-feature pipeline cannot be served as specified.
 
-There are 42,411 customers in both training and validation, 38,474 in both training and test, and 17,660 in both validation and test. This evaluates later orders from a mixture of existing and new customers, not generalization to entirely new customers; consider a separate customer-held-out evaluation. Label availability time is unknown, so temporal ordering alone cannot establish that training labels existed at each evaluation cutoff.
+Payment methods and collection types are lowercased in the shared feature builder. `days_since_first_order` is the normalized calendar-day difference between the order date and `first_order_datetime`. Missing, invalid, or future first-order timestamps become missing, never negative durations. The source calls this the first recorded order, not verified account-creation time. The mask is logically point-in-time safe if the source is a complete historical first-order timestamp; the dataset does not establish when that customer field becomes available. Confirm its provenance before production use.
 
-## Final base-data model-input schema
+## Shared preprocessing
 
-The unencoded interface is `order_value`, `num_items_ordered`, `order_weekday`, `order_month`, `country_code`, `collect_type`, `payment_method`, in that order. The fitted base-data artifact emits 31 columns in the order below. Category names are learned from training; a different training batch may produce a different schema, so all members must share the same fitted artifact for a given model.
+`build_preprocessor()` creates the only preprocessing definition; `fit_preprocessor(train_features)` validates the column order and fits it on training records only. Every member must transform validation/inference data with that fitted artifact.
 
-```text
-amounts__order_value
-amounts__num_items_ordered
-dates__order_weekday
-dates__order_month
-categories__country_code_BD
-categories__country_code_MY
-categories__country_code_PH
-categories__country_code_PK
-categories__country_code_TH
-categories__collect_type_delivery
-categories__collect_type_pickup
-categories__payment_method_Online Banking
-categories__payment_method___missing__
-categories__payment_method_adyen hpp molpay
-categories__payment_method_antfinancial bkash
-categories__payment_method_antfinancial gcash
-categories__payment_method_antfinancial truemoney
-categories__payment_method_balance
-categories__payment_method_boost wallet
-categories__payment_method_credit card
-categories__payment_method_cybersource
-categories__payment_method_cybersource applepay
-categories__payment_method_generic creditcard
-categories__payment_method_invoice
-categories__payment_method_jazzcash wallet
-categories__payment_method_no payment
-categories__payment_method_on Delivery
-categories__payment_method_online banking
-categories__payment_method_payment on Delivery
-categories__payment_method_payment on delivery
-categories__payment_method_paypal
+- Amount/count/history numeric features: training median imputation, `log1p`, then training-fitted `RobustScaler`.
+- Weekday/month: training median imputation.
+- Categorical values: explicit missing category and one-hot encoding fitted on training data; unseen categories are ignored safely.
+- A dense matrix conversion is allowed only as a model input storage adaptation for estimators that cannot consume sparse matrices. It does not change the shared feature meaning.
+
+Do not refit preprocessing on validation or future rows. For PBI 06/07 comparisons, the latest 20% of whole outer-training dates is reserved for threshold calibration; the model fits on the older dates, and that same fitted model scores calibration and validation. Thresholds maximize fraud-class F1 on training-only calibration predictions. Historical PBI 06 runs used their previously documented protocols and remain historical, not shared eight-feature results.
+
+## Usage
+
+```python
+from src.data_access import load_development_tables, VALIDATION_START
+from src.data_cleaning import clean_customers, clean_orders, clean_labels
+from src.feature_engineering import INPUT_FEATURES, prepare_training_data, fit_preprocessor
+
+customers_raw, orders_raw, labels_raw = load_development_tables()
+customers = clean_customers(customers_raw)[0]
+orders = clean_orders(orders_raw)[0]
+labels = clean_labels(labels_raw)[0]
+x_train, y_train, x_val, y_val, _, _, split_report, train_dates = prepare_training_data(
+    customers, orders, labels, include_test=False, include_training_dates=True,
+    validation_start_date=VALIDATION_START,
+)
+preprocessor = fit_preprocessor(x_train)
+train_matrix = preprocessor.transform(x_train)
+validation_matrix = preprocessor.transform(x_val)
+assert list(x_train.columns) == INPUT_FEATURES
 ```
 
-Payment-method casing is kept as provided by PBI 02, so similar labels remain separate until their equivalence is confirmed. Some categories might be operationally unavailable at review time; confirm provenance before production use. The fitted artifact contains learned categories and statistics and should be handled as potentially sensitive. Only load trusted joblib artifacts, and retain the artifact and dependency versions with each future model.
+The latest 15% test partition remains unavailable to development. Do not use test labels or metrics during development. PBI 10 must resolve the customer-ID serving source and first-order field timing before claiming that the eighth feature is production-safe.
