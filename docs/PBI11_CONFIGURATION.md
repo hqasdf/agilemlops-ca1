@@ -41,6 +41,15 @@ Set `PYTHONUTF8=1` before running the pipeline on Windows. Without it the MLflow
 - Messages name settings, never values. The loaded configuration object prints the password as `********`.
 - Keep real files out of git. `.env`, `.env.*` (except `.env.example`) and `*.pem` are in `.gitignore`.
 
+## Notebooks
+
+`KochuveettilTojiEphraimModels.ipynb` reads `MLFLOW_TRACKING_URI` from the environment and stops with a message naming the variable if it is missing. Set it in the shell that starts Jupyter:
+
+```powershell
+$env:MLFLOW_TRACKING_URI = "http://<mlflow-host>"
+jupyter notebook
+```
+
 ## Known gaps
 
-The teammate notebooks (`ca1 hq file.ipynb`, `CA1 copy.ipynb`, `pbi05_connection_check.ipynb`, `PBI07_Nithish_models.ipynb`) still contain a default MLflow URL in a notebook cell. Some honour `MLFLOW_TRACKING_URI`; those cells should read the variable only. This item covers the pipeline and loader scripts.
+The teammate notebooks (`ca1 hq file.ipynb`, `CA1 copy.ipynb`, `pbi05_connection_check.ipynb`, `PBI07_Nithish_models.ipynb`) still contain a default MLflow URL in a notebook cell. Some honour `MLFLOW_TRACKING_URI`; those cells should read the variable only. Their owners need to make that change.
