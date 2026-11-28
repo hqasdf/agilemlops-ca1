@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.pbi10_config import ConfigError, read_config, read_config_file, open_database
+from src.pbi10_config import OPTIONAL, REQUIRED, ConfigError, read_config, read_config_file, open_database
 
 
 class ConfigTests(unittest.TestCase):
@@ -82,6 +82,14 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(kw['ssl_verify_identity'])
         self.assertEqual(kw['ssl_ca'], self.ca)
         self.assertFalse(kw['autocommit'])
+
+    def test_example_file_lists_every_setting_with_placeholders(self):
+        example = read_config_file(Path(__file__).resolve().parents[1] / '.env.example')
+        self.assertEqual(set(example), set(REQUIRED) | set(OPTIONAL))
+        self.assertTrue(all(example.values()))
+        for name in ('CA1_DB_HOST', 'CA1_DB_PASSWORD', 'MLFLOW_TRACKING_URI'):
+            with self.subTest(name=name):
+                self.assertIn('your', example[name])
 
     def test_invalid_values_are_rejected(self):
         for key, value in (('CA1_DB_PORT', '65536'), ('CA1_DOWNLOAD_TIMEOUT_SECONDS', '0'),
