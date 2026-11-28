@@ -168,11 +168,11 @@ def _figures(y_val, scores, cutoff, metrics, title):
 
 
 def _log_run(version, spec, model, cutoff, metrics, x_val, y_val, scores, report, seconds, batch_name,
-             model_fit_rows, threshold_calibration_rows, train_dates):
+             model_fit_rows, threshold_calibration_rows, train_dates, calibration_mask):
     with mlflow.start_run(run_name=f"{MEMBER}-{batch_name}-{version}") as run:
         mlflow.set_tags({"member": MEMBER, "member_name": MEMBER_NAME, "pbi": "07", "model_version": version,
                          "model_name": type(model[-1]).__name__, "dataset": "validation",
-                         "split": "outer chronological 70/15/15; inner fit/calibration 80/20; test untouched",
+                         "split": "chronological validation; calibration rows are held out from model fitting",
                          "change_from_previous": spec["change"]})
         mlflow.log_params({
             "threshold": cutoff, "batch_name": batch_name, "seed": SEED,
@@ -182,8 +182,9 @@ def _log_run(version, spec, model, cutoff, metrics, x_val, y_val, scores, report
             "train_rows": report["training_rows"], "validation_rows": report["validation_rows"],
             "model_fit_rows": model_fit_rows,
             "threshold_calibration_rows": threshold_calibration_rows,
-            "threshold_calibration_start": str(train_dates.loc[recent_training_window(train_dates)].min().date()),
-            "threshold_calibration_end": str(train_dates.loc[recent_training_window(train_dates)].max().date()),
+            "threshold_calibration_start": str(train_dates.loc[calibration_mask].min().date()),
+            "threshold_calibration_end": str(train_dates.loc[calibration_mask].max().date()),
+            "calibration_note": "historical calibration excludes the current batch and may predate fitted current rows" if report.get('new_training_rows') else "latest training dates reserved for calibration",
             "train_first_date": report["train_first_date"], "train_last_date": report["train_last_date"],
             "validation_first_date": report["validation_first_date"],
             "validation_last_date": report["validation_last_date"]})
@@ -255,7 +256,8 @@ def evaluate(model, x_val, y_val, cutoff):
 
 
 def train_nithish_models(customers, orders, labels, tracking_uri=None, experiment_name=EXPERIMENT,
-                         batch_name="base", versions=None, log=True):
+                         batch_name="base", versions=None, log=True, prepared_data=None,
+                         current_batch_indices=None):
     """Clean tables in, three trained versions out. Call this from the PBI 10 pipeline.
 
     customers, orders, labels: retained outputs of the PBI 02 cleaners.
@@ -269,11 +271,18 @@ def train_nithish_models(customers, orders, labels, tracking_uri=None, experimen
     if unknown:
         raise ValueError(f"Unknown model version(s): {unknown}. Choose from {list(VERSIONS)}")
 
-    x_train, y_train, x_val, y_val, train_dates, report = prepare_data(customers, orders, labels)
+    x_train, y_train, x_val, y_val, train_dates, report = (prepare_data(customers, orders, labels)
+                                                         if prepared_data is None else prepared_data)
     if log:
         _set_tracking(tracking_uri, experiment_name)
-    recent = recent_training_window(train_dates)
+    if current_batch_indices is None:
+        recent = recent_training_window(train_dates)
+    else:
+        from src.model_evaluation import historical_calibration_mask
+        recent = historical_calibration_mask(train_dates,current_batch_indices)
     fit_rows = ~recent
+    if current_batch_indices is not None and not x_train.loc[fit_rows].index.isin(current_batch_indices).any():
+        raise ValueError('No current-batch rows are available for Nithish model fitting')
     fitted, cutoffs, results = {}, {}, []
     for version in requested_versions:
         spec = VERSIONS[version]
@@ -282,7 +291,7 @@ def train_nithish_models(customers, orders, labels, tracking_uri=None, experimen
         if build not in fitted:                          # versions of a model family share one fitted model
             fitted[build] = build().fit(x_train.loc[fit_rows], y_train.loc[fit_rows])
         if spec["tune_cutoff"] and build not in cutoffs:
-            cutoffs[build] = choose_cutoff(fitted[build], x_train, y_train, train_dates)
+            cutoffs[build] = best_f1_cutoff(y_train.loc[recent],fitted[build].predict_proba(x_train.loc[recent])[:,1])
         seconds = perf_counter() - start
         model = fitted[build]
         cutoff = cutoffs[build] if spec["tune_cutoff"] else 0.5
@@ -294,7 +303,7 @@ def train_nithish_models(customers, orders, labels, tracking_uri=None, experimen
                   "tracking_uri": mlflow.get_tracking_uri() if log else None}
         if log:
             run_id = _log_run(version, spec, model, cutoff, metrics, x_val, y_val, scores,
-                              report, seconds, batch_name, int(fit_rows.sum()), int(recent.sum()), train_dates)
+                              report, seconds, batch_name, int(fit_rows.sum()), int(recent.sum()), train_dates, recent)
             result.update({"run_id": run_id, "model_uri": f"runs:/{run_id}/model"})
         results.append(result)
     return results
@@ -310,3 +319,5 @@ if __name__ == "__main__":
         m = row["metrics"]
         print(f"{row['version']:28s} F1 {m['f1']:.4f}  precision {m['precision']:.4f}  "
               f"recall {m['recall']:.4f}  AP {m['average_precision']:.4f}  run {row.get('run_id')}")
+
+
