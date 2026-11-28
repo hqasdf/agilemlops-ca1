@@ -47,13 +47,14 @@ The EB container uses SQLite and a local artifact directory for the PBI 05 basel
 
 Each member sets the MLflow client tracking URI to the shared EB URL (no trailing path) and confirms the browser UI opens. The team should use the same server URL and compatible MLflow client version; record the exact client and server versions used.
 
-## Acceptance evidence — do not tick until shown
+## Acceptance evidence
 
-- [ ] EB Docker environment is Healthy/Ok and the service URL responds.
-- [ ] Each of the three members logs and retrieves a parameter, metric, and small harmless artifact through the shared service; record member, run ID and retrieval result.
-- [ ] Register a small test model/version and verify it appears in the registry for PBI 09.
-- [ ] Preserve the exact deployed ZIP, SHA-256, Dockerfile, setup files and dependency versions in the group submission location.
-- [ ] Document deployment, connection, recovery and external configuration; retain a teammate review/PR.
+- [x] EB Docker environment is Healthy/Ok and the service URL responds (screenshots 01 and 02, 14 Nov; the current server is described in the final status below).
+- [x] Each of the three members logs and retrieves parameters, metrics and model artifacts through the shared service (final status below).
+- [x] A model registry is available for PBI 09 (`fraud-detector`, final status below).
+- [x] The exact deployed ZIP, its SHA-256, the Dockerfile and the dependency versions are kept in this repository (`reports/pbi05_evidence/mlflow-eb.zip`, `Dockerfile`); the bundle now running is in `reports/pbi12_evidence/deployment_bundle/`.
+- [x] Deployment, connection and external-configuration instructions are documented in this file.
+- [ ] Teammate review or pull-request evidence for this document.
 
 ## Out of scope
 
@@ -71,4 +72,39 @@ Evidence files are in `reports/pbi05_evidence/`:
 
 Deployed ZIP SHA-256: `D330E002C119A378D68300916FC5A60C56973AF8B7E4FF6248EB2D9ECFE00E28`.
 
-Progress boundary: these results verify the owner's deployment and smoke checks. The acceptance criterion requiring all three members to log **and retrieve** parameters, metrics, and an artifact remains pending until each teammate's result is recorded. The environment was terminated after these checks to conserve AWS Academy credits; restore or redeploy it before teammate testing. The local SQLite database and artifact directory are baseline-only and are not claimed to be durable; PBI 12 owns that improvement.
+Progress boundary: these results verify the owner's deployment and smoke checks. The environment was terminated after those checks to conserve AWS Academy credits. It was restored on 16 November, and the MLflow UI became reachable again. The latest Elastic Beanstalk health state has not been captured.
+
+## Teammate smoke test — 16 November 2026
+
+The MLflow Experiments page showed PBI05-teammate-smoke-test at the restored endpoint. This confirms that the browser reached the service and the experiment was created.
+
+Evidence files:
+
+- reports/pbi05_evidence/05-teammate-experiment-created.png — the experiment is visible in the MLflow UI.
+- reports/pbi05_evidence/06-teammate-runs-page-error.png — the Runs page displayed INTERNAL_ERROR. Its screenshot also shows an old example filter (metrics.rmse < 1 and params.model = "tree") and the state filter set to Active.
+
+These screenshots do not confirm that teammate-connection-check finished, that connection_test = 1.0 was logged, or that test.txt was retrieved. This attempt verifies endpoint access and experiment creation only. The acceptance criterion requiring every member to log and retrieve a parameter, metric, and artifact remains pending. Retry after clearing the filter and selecting All or Finished, then record the run ID and verify the metric and artifact.
+
+The local SQLite database and artifact directory are baseline-only and are not claimed to be durable; PBI 12 owns that improvement.
+
+## Final status (23 November 2026)
+
+**Which server is the shared server.** The PBI 05 environment was a baseline with SQLite and container-local artifacts. PBI 12 replaced it with `mlflow-pbi12` (RDS MySQL for metadata, S3 for artifacts). All team work now uses this URL:
+
+`http://mlflow-pbi12.eba-9bnrxizu.us-east-1.elasticbeanstalk.com`
+
+The roughly 491 runs held by the old PBI 05 server were not migrated (see `reports/PBI12_MLFLOW_STORAGE.md`). The PBI 05 evidence above remains the record of the first deployment. The teammate smoke test of 16 November, which ended with an `INTERNAL_ERROR` on the Runs page, is superseded by the results below.
+
+**All three members use the shared service.** On 23 November the shared server holds:
+
+| Member | Experiment | Runs | Retrievable models |
+| --- | --- | ---: | --- |
+| Han Qian | `PBI06_HanQian` | 28 | model files on the runs (checked on the two registered runs: `MLmodel`, `python_model.pkl`, environment files) |
+| Nithish | `PBI07_Nithish` | 3 | one logged model per run |
+| Ephraim | `PBI08_Ephraim` | 18 | logged models on the tuned runs; the baseline weights were kept locally |
+
+Parameters, metrics, tags and member identity are logged on every run. Screenshots of the three experiment run lists are in `reports/pbi09_evidence/` on the PBI 09 branch (`final07_hanqian_runs_28.jpg`, `final08_ephraim_runs_8.jpg`, `final09_nithish_runs_3.jpg`; the Ephraim image was taken when that experiment had 8 runs).
+
+**Model registry.** The registry holds `fraud-detector` version 1 (alias `champion`, Han Qian's calibrated Random Forest) and version 2 (alias `runner-up`, calibrated CatBoost), registered on 23 November for PBI 09. Han Qian loaded both back through the registry aliases the same day (`reports/pbi09_evidence/final06_load_test_han_qian.jpg`).
+
+**Using the server.** Set the client tracking URI to the address above (no trailing path) before logging, for example `$env:MLFLOW_TRACKING_URI="http://mlflow-pbi12.eba-9bnrxizu.us-east-1.elasticbeanstalk.com"` in PowerShell. Connection settings come from environment variables and are not committed. The server uses plain HTTP and has no login, so do not log personal data. The server stops when the AWS Learner Lab session ends; start the lab, wait until the environment is Green and open `/health` before use.
