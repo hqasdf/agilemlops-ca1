@@ -1,6 +1,7 @@
 """Coordinate batch stages and report each member's retraining outcome."""
 import time
 import sys
+import traceback
 from urllib.parse import urlparse
 
 
@@ -35,7 +36,9 @@ def run_batch(batch_id, tracking_uri, prepare, load, read_updated, train):
                 raise ValueError('A run ID and model URI are required for each model')
             summary['models'][member]={'status':'success','runs':runs}
         except Exception as exc:
-            summary['models'][member]={'status':'failed','error_type':type(exc).__name__}
+            traceback.print_exc(file=sys.stderr)
+            summary['models'][member]={'status':'failed','error_type':type(exc).__name__,
+                                       'error':' '.join(str(exc).split())[:300]}
     summary['status']='success' if all(v['status']=='success' for v in summary['models'].values()) else 'failed'
     summary['elapsed_seconds']=round(time.perf_counter()-start,3)
     return summary
