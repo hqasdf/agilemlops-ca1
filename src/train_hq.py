@@ -9,12 +9,14 @@ import os
 from pathlib import Path
 import tempfile
 from time import perf_counter
+from uuid import uuid4
 
 import joblib
 import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
-from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
+from sklearn.ensemble import (GradientBoostingClassifier, HistGradientBoostingClassifier,
+                              RandomForestClassifier)
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import ParameterSampler
 from xgboost import XGBClassifier
@@ -25,8 +27,9 @@ from sklearn.metrics import (accuracy_score, average_precision_score, confusion_
                              recall_score, roc_auc_score)
 from threadpoolctl import threadpool_limits
 
-from src.data_cleaning import clean_customers, clean_orders, clean_labels
-from src.feature_engineering import fit_preprocessor, prepare_training_data, training_sample_weights
+from src.feature_engineering import fit_preprocessor, training_sample_weights
+from src.model_evaluation import best_f1_threshold, recent_training_window
+from src.pbi06_tracking import EXPERIMENT, LEGACY_EXPERIMENT, LOCAL_URI, evidence_client, resolve_tracking_uri
 
 
 def model_candidates(seed=42):
@@ -37,6 +40,8 @@ def model_candidates(seed=42):
                                                  class_weight="balanced", n_jobs=4, random_state=seed),
         "hist_gradient_boosting": HistGradientBoostingClassifier(max_iter=80, max_leaf_nodes=15,
                                                                   learning_rate=0.1, random_state=seed),
+        "gradient_boosting": GradientBoostingClassifier(n_estimators=80, max_depth=3,
+                                     learning_rate=0.1, random_state=seed),
         "xgboost": XGBClassifier(n_estimators=80, max_depth=5, learning_rate=0.1,
                                  tree_method="hist", n_jobs=4, random_state=seed),
         "lightgbm": LGBMClassifier(n_estimators=80, num_leaves=31, learning_rate=0.1,
@@ -69,25 +74,30 @@ def rank_results(results):
 
 
 def _tracking(experiment_name, tracking_uri):
-    root = Path("artifacts/mlflow").resolve()
-    local_uri = "sqlite:///" + str(root / "mlflow.db")
-    uri = tracking_uri or os.environ.get("MLFLOW_TRACKING_URI") or local_uri
-    if uri == local_uri:
+    uri = resolve_tracking_uri(tracking_uri)
+    client = mlflow.MlflowClient(tracking_uri=uri)
+    experiment = client.get_experiment_by_name(experiment_name)
+    if experiment_name == EXPERIMENT and client.get_experiment_by_name(LEGACY_EXPERIMENT):
+        raise RuntimeError("The original rebuild experiment exists. Rename it in place before training.")
+    if experiment is None and uri == LOCAL_URI:
+        root = Path(__file__).resolve().parents[1] / "artifacts/mlflow"
         root.mkdir(parents=True, exist_ok=True)
-        mlflow.set_tracking_uri(uri)
-        if mlflow.get_experiment_by_name(experiment_name) is None:
-            mlflow.create_experiment(experiment_name, artifact_location=(root / "artifacts").as_uri())
-    else:
-        mlflow.set_tracking_uri(uri)
+        client.create_experiment(experiment_name, artifact_location=(root / "artifacts").as_uri())
+    mlflow.set_tracking_uri(uri)
     mlflow.set_experiment(experiment_name)
     return uri
 
 
 def _log_run(name, version, model, preprocessor, y_val, probabilities, threshold,
-             metrics, report, train_seconds, predict_seconds, member, weighting, extra_params=None, run_label=None, split_description="chronological 70/15/15; test untouched"):
+             metrics, report, train_seconds, predict_seconds, member, weighting,
+             extra_params=None, run_label=None, split_description="chronological 70/15/15; test untouched",
+             run_tags=None):
     with mlflow.start_run(run_name=run_label or f"{member}-{name}-{version}") as run:
-        mlflow.set_tags({"member": member, "model_name": name, "model_version": version,
-                         "split": split_description, "dataset": "validation"})
+        tags = {"member": member, "model_name": name, "model_version": version,
+                "split": split_description, "dataset": "validation"}
+        if run_tags:
+            tags.update(run_tags)
+        mlflow.set_tags(tags)
         mlflow.log_params({"threshold": threshold, "class_weighting": weighting,
                            "preprocessing": "train-only median/log1p/robust/onehot",
                            "train_first_date": report["train_first_date"], "train_last_date": report["train_last_date"],
@@ -96,7 +106,7 @@ def _log_run(name, version, model, preprocessor, y_val, probabilities, threshold
                            "train_rows": report["training_rows"], "validation_rows": report["validation_rows"],
                            "seed": 42})
         if extra_params:
-            mlflow.log_params(extra_params)
+            mlflow.log_params({key: str(value) for key, value in extra_params.items()})
         mlflow.log_params({"model__" + key: str(value) for key, value in model.get_params().items()})
         mlflow.log_dict(model.get_params(), "model_parameters.json")
         mlflow.log_metrics({**metrics, "training_seconds": train_seconds, "prediction_seconds": predict_seconds})
@@ -127,25 +137,16 @@ def _log_run(name, version, model, preprocessor, y_val, probabilities, threshold
         return run.info.run_id
 
 
-def train_benchmark(customers, orders, labels, tracking_uri=None, experiment_name="PBI06_HQ", member="Han Qian"):
-    """Clean a new batch, fit on training, compare on validation, and log runs.
-
-    Returns (ranked validation results, split report, tracking URI). The PBI 03
-    include_test=False path does not construct test features or return test labels.
-    No locally saved preprocessor is needed; each invocation fits a new one.
-    """
-    customers = clean_customers(customers)[0]
-    orders = clean_orders(orders)[0]
-    labels = clean_labels(labels)[0]
-    x_train, y_train, x_val, y_val, _, _, report = prepare_training_data(customers, orders, labels, include_test=False)
-    results, uri = train_prepared(x_train, y_train, x_val, y_val, report,
-                                  tracking_uri=tracking_uri, experiment_name=experiment_name, member=member)
-    return results, report, uri
+def train_benchmark(x_train, y_train, x_val, y_val, report, preprocessor=None,
+                    tracking_uri=None, experiment_name="PBI06_HQ", member="Han Qian"):
+    """Train baseline models from training and validation inputs only."""
+    return train_prepared(x_train, y_train, x_val, y_val, report, preprocessor,
+                          tracking_uri, experiment_name, member)
 
 
 def train_prepared(x_train, y_train, x_val, y_val, report, preprocessor=None,
                    tracking_uri=None, experiment_name="PBI06_HQ", member="Han Qian"):
-    """Train the six baselines on PBI 03 training and validation data.
+    """Train the seven baselines on PBI 03 training and validation data.
 
     If supplied, the preprocessor must have been fitted on x_train only. The
     notebook can reuse its PBI 03 preprocessor; other callers can omit it.
@@ -163,11 +164,11 @@ def train_prepared(x_train, y_train, x_val, y_val, report, preprocessor=None,
         for name, model in model_candidates().items():
             print(f"Training {name}...", flush=True)
             # Histogram boosting and CatBoost use the same features in dense form.
-            needs_dense = name in ("hist_gradient_boosting", "catboost")
+            needs_dense = name in ("hist_gradient_boosting", "gradient_boosting", "catboost")
             train_input = train.toarray() if needs_dense and hasattr(train, "toarray") else train
             val_input = val.toarray() if needs_dense and hasattr(val, "toarray") else val
             start = perf_counter()
-            if name in ("hist_gradient_boosting", "xgboost", "lightgbm", "catboost"):
+            if name in ("hist_gradient_boosting", "gradient_boosting", "xgboost", "lightgbm", "catboost"):
                 model.fit(train_input, y_train, sample_weight=weights)
                 weighting = "balanced training sample weights"
             else:
@@ -186,6 +187,104 @@ def train_prepared(x_train, y_train, x_val, y_val, report, preprocessor=None,
             results.append(row)
             print(f"Finished {name}: validation fraud F1 = {metrics['f1']:.4f}", flush=True)
     return rank_results(results), uri
+
+
+def train_shared_feature_comparison(x_train, y_train, train_dates, x_val, y_val,
+                                    report, selected_models, tracking_uri=None,
+                                    member="Han Qian"):
+    """Fit fixed selected configurations with shared 8-feature prep and cutoff rule.
+
+    The newest 20% of whole outer-training dates is reserved for threshold
+    calibration. Each model is fit once on older training rows; that same fitted
+    model produces calibration and validation probabilities. No search or test
+    data are used. ``selected_models`` maps model names to saved params and
+    training-only weight strength from prior PBI 06 evidence.
+    """
+    import pandas as pd
+
+    from src.feature_engineering import INPUT_FEATURES
+
+    if list(x_train.columns) != INPUT_FEATURES or list(x_val.columns) != INPUT_FEATURES:
+        raise ValueError("Shared comparison requires the exact PBI 03 eight-feature schema")
+    if not x_train.index.equals(y_train.index) or not x_train.index.equals(train_dates.index):
+        raise ValueError("Training features, labels and dates must have matching indices")
+    if not x_val.index.equals(y_val.index) or not x_train.index.intersection(x_val.index).empty:
+        raise ValueError("Training and validation rows must have matching, disjoint indices")
+    if list(x_train.columns) != list(x_val.columns):
+        raise ValueError("Training and validation features must have the same order")
+    if not set(selected_models).issubset(model_candidates()):
+        raise ValueError("A saved configuration names an unsupported model")
+
+    calibration_mask = recent_training_window(train_dates, share=0.20)
+    fit_mask = ~calibration_mask
+    fit_y = y_train.loc[fit_mask]
+    calibration_y = y_train.loc[calibration_mask]
+    if set(fit_y.unique()) != {0, 1} or set(calibration_y.unique()) != {0, 1}:
+        raise ValueError("Training and calibration periods must each contain both classes")
+
+    preprocessor = fit_preprocessor(x_train.loc[fit_mask])
+    fit_matrix = preprocessor.transform(x_train.loc[fit_mask]).astype(np.float32)
+    calibration_matrix = preprocessor.transform(x_train.loc[calibration_mask]).astype(np.float32)
+    validation_matrix = preprocessor.transform(x_val).astype(np.float32)
+    uri = _tracking("PBI06_SharedEightFeature", tracking_uri)
+    rows = []
+
+    with threadpool_limits(limits=4):
+        for name, config in selected_models.items():
+            print(f"Training shared eight-feature {name}...", flush=True)
+            model = _seven_model(name, config["params"], seed=42)
+            fit_input = _model_input(name, fit_matrix)
+            calibration_input = _model_input(name, calibration_matrix)
+            validation_input = _model_input(name, validation_matrix)
+            start = perf_counter()
+            _fit_weighted(model, name, fit_input, fit_y, config["weight_strength"])
+            training_seconds = perf_counter() - start
+            calibration_probabilities = model.predict_proba(calibration_input)[:, 1]
+            threshold = best_f1_threshold(calibration_y, calibration_probabilities)
+            calibration_f1 = f1_score(
+                calibration_y, calibration_probabilities >= threshold, zero_division=0
+            )
+            start = perf_counter()
+            probabilities = model.predict_proba(validation_input)[:, 1]
+            prediction_seconds = perf_counter() - start
+            metrics_at_half = validation_metrics(y_val, probabilities, 0.5)
+            metrics = validation_metrics(y_val, probabilities, threshold)
+            run_id = _log_run(
+                name, "shared_eight_feature", model, preprocessor, y_val, probabilities,
+                threshold, metrics, report, training_seconds, prediction_seconds,
+                member, f"training-only balanced weight strength {config['weight_strength']}",
+                extra_params={
+                    "selected_parameters": config["params"],
+                    "selected_config_source": config.get("source_run_id", "saved PBI06 configuration"),
+                    "feature_schema_version": "shared_8_feature_v1",
+                    "threshold_rule": "max fraud F1 on newest 20% of whole training dates",
+                    "calibration_f1": float(calibration_f1),
+                    "calibration_rows": int(calibration_mask.sum()),
+                    "fit_rows": int(fit_mask.sum()),
+                },
+                run_label=f"{member}-{name}-shared-eight-feature",
+                split_description="chronological training/calibration/validation; test untouched",
+            )
+            row = {
+                "model": name, "version": "shared_eight_feature",
+                "threshold": threshold, "calibration_f1": float(calibration_f1),
+                "f1_at_0.5": metrics_at_half["f1"], **metrics,
+                "training_seconds": training_seconds,
+                "prediction_seconds": prediction_seconds,
+                "fit_rows": int(fit_mask.sum()),
+                "calibration_rows": int(calibration_mask.sum()),
+                "selected_parameters": config["params"],
+                "source_run_id": config.get("source_run_id"),
+                "run_id": run_id,
+            }
+            rows.append(row)
+            print(f"Finished {name}: validation fraud F1 = {metrics['f1']:.4f}", flush=True)
+
+    leaderboard = pd.DataFrame(rows).sort_values(
+        ["f1", "average_precision"], ascending=[False, False]
+    ).reset_index(drop=True)
+    return {"results": rows, "leaderboard": leaderboard, "tracking_uri": uri,
+            "calibration_rule": "latest 20% of whole outer-training dates"}
 
 
 def tuning_candidates():
@@ -279,8 +378,7 @@ def tune_top_models(x_train, y_train, train_dates, x_val, y_val, report,
     if train_dates.max() > pd.Timestamp(report["train_last_date"]) or train_dates.max() >= pd.Timestamp(report["validation_first_date"]):
         raise ValueError("Training dates must precede outer validation")
     folds = chronological_folds(x_train, train_dates)
-    local_uri = "sqlite:///" + str(Path("artifacts/mlflow/mlflow.db").resolve())
-    _tracking("PBI06_HQ", tracking_uri or local_uri)
+    _tracking("PBI06_HQ", tracking_uri)
     candidates = tuning_candidates() if candidates_override is None else candidates_override
     trials = []
     search_start = perf_counter()
@@ -409,30 +507,14 @@ SAVED_ADVANCED_RUNS = {
     "catboost": "12c49c06191b47e2898a126c9f722e11",
     "random_forest": "a8998c12d8004c8e9f47db017db1f2f5",
 }
-BASE_DATA_HASHES = {
-    "customers_base.csv": "501c06997d496e127d3e1b2c28d34b47dfe0dcf124f90abf83de60867f557c7e",
-    "orders_base.csv": "934d9143861feac2c00aaa9bf782418e52959d13cfa7fd47b67ebf79f10e67f8",
-    "labels_base.csv": "cde4cc62977ba48f4402a8bac756518fceb5e899cdbeb420a773936d376d5ce4",
-}
 ADVANCED_REFERENCE = Path("artifacts/ca1_advanced_reference.json")
 
 
-def data_hashes():
-    """Fingerprint source files without displaying rows or label values."""
-    import hashlib
-
-    hashes = {}
-    for filename in BASE_DATA_HASHES:
-        with open(filename, "rb") as source:
-            hashes[filename] = hashlib.file_digest(source, "sha256").hexdigest()
-    return hashes
-
-
 def save_advanced_reference(results):
-    """Remember newly rerun advanced models for later notebook executions."""
+    """Remember selected run IDs without reading or hashing raw source files."""
     import json
 
-    reference = {"runs": {row["model"]: row["run_id"] for row in results}, "data_hashes": data_hashes()}
+    reference = {"runs": {row["model"]: row["run_id"] for row in results}}
     ADVANCED_REFERENCE.parent.mkdir(parents=True, exist_ok=True)
     ADVANCED_REFERENCE.write_text(json.dumps(reference, indent=2), encoding="utf-8")
 
@@ -446,15 +528,11 @@ def load_saved_advanced_results(report, tracking_uri=None):
     import json
     import pandas as pd
 
-    local_uri = "sqlite:///" + str(Path("artifacts/mlflow/mlflow.db").resolve())
-    _tracking("PBI06_HQ", tracking_uri or local_uri)
     if ADVANCED_REFERENCE.exists():
         reference = json.loads(ADVANCED_REFERENCE.read_text(encoding="utf-8"))
     else:
-        reference = {"runs": SAVED_ADVANCED_RUNS, "data_hashes": BASE_DATA_HASHES}
-    if data_hashes() != reference["data_hashes"]:
-        raise ValueError("Source files differ from the saved advanced search; set RUN_ADVANCED_SEARCH=True and rerun it.")
-    client = mlflow.MlflowClient()
+        reference = {"runs": SAVED_ADVANCED_RUNS}
+    client = evidence_client(tracking_uri)
     candidates = advanced_candidates()
     results = []
     starts = []
@@ -474,7 +552,7 @@ def load_saved_advanced_results(report, tracking_uri=None):
                 raise ValueError("Saved hyperparameters differ from the current configuration; rerun advanced search.")
         if run.data.params.get("class_weighting") != f"training-only balanced weight strength {strength}":
             raise ValueError("Saved class weighting differs from the current configuration; rerun advanced search.")
-        parameter_file = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="model_parameters.json")
+        parameter_file = client.download_artifacts(run_id=run_id, path="model_parameters.json")
         parameters = json.loads(Path(parameter_file).read_text(encoding="utf-8"))
         metrics = run.data.metrics
         row = {"model": name, "version": "advanced_tuned", "threshold": 0.5,
@@ -508,18 +586,499 @@ def load_saved_advanced_results(report, tracking_uri=None):
 
 def select_f1_threshold(y, probabilities):
     """Maximize F1 on training-only predictions; break exact ties upwards."""
-    precision, recall, thresholds = precision_recall_curve(y, probabilities)
-    if len(thresholds) == 0:
-        raise ValueError("Threshold selection needs nonempty predictions")
-    denominator = precision[:-1] + recall[:-1]
-    f1 = np.divide(2 * precision[:-1] * recall[:-1], denominator,
-                   out=np.zeros_like(denominator), where=denominator != 0)
-    best = np.flatnonzero(f1 == f1.max())[-1]
-    return float(thresholds[best]), float(f1[best])
+    threshold = best_f1_threshold(y, probabilities)
+    return threshold, float(f1_score(y, np.asarray(probabilities) >= threshold, zero_division=0))
+
+
+def seven_model_candidates(seed=42):
+    """Return three reproducible tuning configurations for every model family."""
+    return {
+        "logistic_regression": [
+            ({"C": 0.1, "max_iter": 500}, 0.5),
+            ({"C": 1.0, "max_iter": 500}, 0.75),
+            ({"C": 10.0, "max_iter": 500}, 1.0),
+        ],
+        "random_forest": [
+            ({"n_estimators": 60, "max_depth": 12, "min_samples_leaf": 30, "max_features": 0.8}, 0.5),
+            ({"n_estimators": 100, "max_depth": 16, "min_samples_leaf": 50, "max_features": 1.0}, 0.75),
+            ({"n_estimators": 80, "max_depth": None, "min_samples_leaf": 40, "max_features": 0.8}, 1.0),
+        ],
+        "xgboost": [
+            ({"n_estimators": 80, "max_depth": 4, "learning_rate": 0.05, "reg_lambda": 2,
+              "subsample": 0.8, "colsample_bytree": 0.8}, 0.5),
+            ({"n_estimators": 120, "max_depth": 5, "learning_rate": 0.08, "reg_lambda": 5,
+              "subsample": 0.9, "colsample_bytree": 0.8}, 0.75),
+            ({"n_estimators": 160, "max_depth": 3, "learning_rate": 0.04, "reg_lambda": 10,
+              "subsample": 0.8, "colsample_bytree": 1.0}, 1.0),
+        ],
+        "lightgbm": [
+            ({"n_estimators": 80, "num_leaves": 15, "learning_rate": 0.05, "reg_lambda": 2,
+              "min_child_samples": 30, "subsample": 0.8, "subsample_freq": 1,
+              "colsample_bytree": 0.8}, 0.5),
+            ({"n_estimators": 120, "num_leaves": 23, "learning_rate": 0.08, "reg_lambda": 5,
+              "min_child_samples": 50, "subsample": 0.9, "subsample_freq": 1,
+              "colsample_bytree": 0.8}, 0.75),
+            ({"n_estimators": 160, "num_leaves": 31, "learning_rate": 0.04, "reg_lambda": 10,
+              "min_child_samples": 80, "subsample": 0.8, "subsample_freq": 1,
+              "colsample_bytree": 1.0}, 1.0),
+        ],
+        "catboost": [
+            ({"iterations": 80, "depth": 4, "learning_rate": 0.08, "l2_leaf_reg": 3,
+              "subsample": 0.8, "bootstrap_type": "Bernoulli"}, 0.5),
+            ({"iterations": 120, "depth": 5, "learning_rate": 0.06, "l2_leaf_reg": 5,
+              "subsample": 0.9, "bootstrap_type": "Bernoulli"}, 0.75),
+            ({"iterations": 160, "depth": 6, "learning_rate": 0.04, "l2_leaf_reg": 10,
+              "subsample": 0.8, "bootstrap_type": "Bernoulli"}, 1.0),
+        ],
+        "hist_gradient_boosting": [
+            ({"max_iter": 80, "max_leaf_nodes": 15, "learning_rate": 0.05,
+              "l2_regularization": 1.0}, 0.5),
+            ({"max_iter": 120, "max_leaf_nodes": 31, "learning_rate": 0.05,
+              "l2_regularization": 5.0}, 0.75),
+            ({"max_iter": 160, "max_leaf_nodes": 31, "learning_rate": 0.08,
+              "l2_regularization": 10.0}, 1.0),
+        ],
+        "gradient_boosting": [
+            ({"n_estimators": 80, "max_depth": 2, "learning_rate": 0.05,
+              "subsample": 0.8, "min_samples_leaf": 20}, 0.5),
+            ({"n_estimators": 100, "max_depth": 3, "learning_rate": 0.1,
+              "subsample": 0.8, "min_samples_leaf": 40}, 0.75),
+            ({"n_estimators": 120, "max_depth": 2, "learning_rate": 0.1,
+              "subsample": 1.0, "min_samples_leaf": 20}, 1.0),
+        ],
+    }
+
+
+def _seven_model(name, params, seed):
+    """Build one tuned candidate with class weighting handled by sample weights."""
+    model = model_candidates(seed)[name]
+    if name in ("logistic_regression", "random_forest"):
+        model.set_params(class_weight=None)
+    current_params = model.get_params()
+    clean_params = {}
+    for key, value in params.items():
+        current_value = current_params.get(key)
+        if isinstance(value, str) and not isinstance(current_value, str):
+            if value == "None":
+                value = None
+            elif isinstance(current_value, bool):
+                value = value.lower() == "true"
+            elif isinstance(current_value, int):
+                value = int(value)
+            elif isinstance(current_value, float):
+                value = float(value)
+        clean_params[key] = value
+    return model.set_params(**clean_params)
+
+
+def _model_input(name, matrix):
+    if name in ("catboost", "hist_gradient_boosting", "gradient_boosting") and hasattr(matrix, "toarray"):
+        return matrix.toarray()
+    return matrix
+
+
+def _validate_training_inputs(x_train, y_train, train_dates, x_val, y_val, report):
+    import pandas as pd
+
+    if not x_train.index.is_unique or not x_val.index.is_unique:
+        raise ValueError("Training and validation row indices must be unique")
+    if not x_train.index.equals(y_train.index) or not x_train.index.equals(train_dates.index):
+        raise ValueError("Training features, labels and dates must have matching indices")
+    if not x_val.index.equals(y_val.index):
+        raise ValueError("Validation features and labels must have matching indices")
+    if not x_train.index.intersection(x_val.index).empty:
+        raise ValueError("Training and validation rows overlap")
+    if list(x_train.columns) != list(x_val.columns):
+        raise ValueError("Training and validation feature schemas differ")
+    if set(y_train.unique()) != {0, 1} or set(y_val.unique()) != {0, 1}:
+        raise ValueError("Training and validation labels must each contain both classes")
+    dates = pd.to_datetime(train_dates, errors="raise")
+    if dates.isna().any() or dates.max() >= pd.Timestamp(report["validation_first_date"]):
+        raise ValueError("Training dates must be valid and precede validation")
+    if len(x_train) != report["training_rows"] or len(x_val) != report["validation_rows"]:
+        raise ValueError("Split report row counts do not match the supplied data")
+
+
+def run_seven_model_experiments(x_train, y_train, train_dates, x_val, y_val, report,
+                                tracking_uri=None, experiment_name="PBI06_FinalOptimization",
+                                member="Han Qian", seed=42):
+    """Run baseline, train-only tuning and OOF threshold selection for all seven models.
+
+    The outer validation partition is used only for the final comparison. Search
+    uses three configurations per model and two expanding whole-date folds.
+    Every fold fits its preprocessor and class weights on that fold's training
+    rows. The selected threshold uses the selected candidate's pooled OOF scores;
+    because those folds also selected hyperparameters, its training F1 is
+    optimistic. No test data is accepted by this interface.
+    """
+    import pandas as pd
+
+    _validate_training_inputs(x_train, y_train, train_dates, x_val, y_val, report)
+    uri = _tracking(experiment_name, tracking_uri)
+    search_id = uuid4().hex
+    candidates = seven_model_candidates(seed)
+    model_names = list(candidates)
+    folds = chronological_folds(x_train, train_dates)
+    trial_rows = []
+    candidate_predictions = {}
+    model_search_seconds = {name: 0.0 for name in model_names}
+    all_start = perf_counter()
+
+    print("Training seven baseline models at threshold 0.5...", flush=True)
+    baseline_preprocessor = fit_preprocessor(x_train)
+    baseline_train_matrix = baseline_preprocessor.transform(x_train).astype(np.float32)
+    baseline_val_matrix = baseline_preprocessor.transform(x_val).astype(np.float32)
+    baseline_results = []
+    with threadpool_limits(limits=4):
+        for name in model_names:
+            model = model_candidates(seed)[name]
+            train_matrix = _model_input(name, baseline_train_matrix)
+            val_matrix = _model_input(name, baseline_val_matrix)
+            start = perf_counter()
+            if name in ("logistic_regression", "random_forest"):
+                model.fit(train_matrix, y_train)
+                weighting = "balanced class weights"
+            else:
+                model.fit(train_matrix, y_train, sample_weight=training_sample_weights(y_train))
+                weighting = "balanced training sample weights"
+            fit_seconds = perf_counter() - start
+            start = perf_counter()
+            probabilities = model.predict_proba(val_matrix)[:, 1]
+            predict_seconds = perf_counter() - start
+            metrics = validation_metrics(y_val, probabilities, 0.5)
+            run_id = _log_run(name, "final_baseline", model, baseline_preprocessor, y_val,
+                              probabilities, 0.5, metrics, report, fit_seconds, predict_seconds,
+                              member, weighting, extra_params={"seed": seed, "search": "baseline"},
+                              run_label=f"{member}-{name}-final-baseline",
+                              run_tags={"search_id": search_id})
+            baseline_results.append({"model": name, "version": "baseline", "threshold": 0.5,
+                                    **metrics, "training_seconds": fit_seconds,
+                                    "prediction_seconds": predict_seconds,
+                                    "parameters": model.get_params(), "run_id": run_id})
+            print(f"Baseline {name}: validation F1={metrics['f1']:.4f}", flush=True)
+
+    print("Tuning seven models on two chronological training-only folds...", flush=True)
+    search_start = perf_counter()
+    for fold_number, (train_mask, valid_mask) in enumerate(folds, start=1):
+        fold_x = x_train.loc[train_mask]
+        fold_y = y_train.loc[train_mask]
+        fold_val_x = x_train.loc[valid_mask]
+        fold_val_y = y_train.loc[valid_mask]
+        if set(fold_y.unique()) != {0, 1} or set(fold_val_y.unique()) != {0, 1}:
+            raise ValueError("Each chronological fold must contain both fraud classes")
+        fold_preprocessor = fit_preprocessor(fold_x)
+        train_matrix = fold_preprocessor.transform(fold_x).astype(np.float32)
+        val_matrix = fold_preprocessor.transform(fold_val_x).astype(np.float32)
+        weights = training_sample_weights(fold_y)
+        fold_dates = {
+            "inner_train_first": str(train_dates.loc[train_mask].min().date()),
+            "inner_train_last": str(train_dates.loc[train_mask].max().date()),
+            "inner_val_first": str(train_dates.loc[valid_mask].min().date()),
+            "inner_val_last": str(train_dates.loc[valid_mask].max().date()),
+        }
+        for name in model_names:
+            for candidate_number, (params, weight_strength) in enumerate(candidates[name], start=1):
+                print(f"Fold {fold_number}: {name}, configuration {candidate_number}/3", flush=True)
+                model = _seven_model(name, params, seed)
+                fit_start = perf_counter()
+                model.fit(_model_input(name, train_matrix), fold_y,
+                          sample_weight=1 + weight_strength * (weights - 1))
+                fit_seconds = perf_counter() - fit_start
+                probabilities = model.predict_proba(_model_input(name, val_matrix))[:, 1]
+                metrics = validation_metrics(fold_val_y, probabilities, 0.5)
+                with mlflow.start_run(run_name=f"{member}-{name}-final-cv{fold_number}-c{candidate_number}") as run:
+                    mlflow.set_tags({"member": member, "model_name": name,
+                                     "model_version": "final_tuning_trial",
+                                     "dataset": "training_internal_validation",
+                                     "search_id": search_id})
+                    mlflow.log_params({"candidate": candidate_number, "fold": fold_number,
+                                       "threshold": 0.5, "weight_strength": weight_strength,
+                                       "seed": seed, "split": "chronological whole-date fold",
+                                       "train_rows": len(fold_x), "validation_rows": len(fold_val_x),
+                                       **fold_dates, **{"model__" + key: str(value)
+                                                       for key, value in model.get_params().items()}})
+                    mlflow.log_metrics({**metrics, "training_seconds": fit_seconds})
+                    mlflow.log_dict(params, "selected_candidate_parameters.json")
+                    trial_id = run.info.run_id
+                trial_rows.append({"model": name, "candidate": candidate_number,
+                                   "fold": fold_number, "inner_f1": metrics["f1"],
+                                   "parameters": params, "weight_strength": weight_strength,
+                                   "training_seconds": fit_seconds, "run_id": trial_id})
+                model_search_seconds[name] += fit_seconds
+                candidate_predictions.setdefault((name, candidate_number), []).append(
+                    (fold_val_y.to_numpy(), probabilities)
+                )
+
+    search_wall_seconds = perf_counter() - search_start
+
+    trial_table = pd.DataFrame(trial_rows)
+    mean_scores = trial_table.groupby(["model", "candidate"], as_index=False)["inner_f1"].mean()
+    best_rows = mean_scores.sort_values(["model", "inner_f1", "candidate"],
+                                        ascending=[True, False, True]).drop_duplicates("model")
+    selected = {row.model: int(row.candidate) for row in best_rows.itertuples()}
+
+    tuned_preprocessor = fit_preprocessor(x_train)
+    tuned_train = tuned_preprocessor.transform(x_train).astype(np.float32)
+    tuned_val = tuned_preprocessor.transform(x_val).astype(np.float32)
+    tuned_results = []
+    threshold_results = []
+    for name in model_names:
+        candidate_number = selected[name]
+        params, weight_strength = candidates[name][candidate_number - 1]
+        choice = best_rows.loc[best_rows["model"] == name].iloc[0]
+        oof = candidate_predictions[(name, candidate_number)]
+        oof_y = np.concatenate([part[0] for part in oof])
+        oof_scores = np.concatenate([part[1] for part in oof])
+        threshold_start = perf_counter()
+        threshold, oof_f1 = select_f1_threshold(oof_y, oof_scores)
+        threshold_seconds = perf_counter() - threshold_start
+
+        print(f"Refitting selected {name} configuration {candidate_number} on training data...", flush=True)
+        model = _seven_model(name, params, seed)
+        train_matrix = _model_input(name, tuned_train)
+        val_matrix = _model_input(name, tuned_val)
+        weights = training_sample_weights(y_train)
+        fit_start = perf_counter()
+        model.fit(train_matrix, y_train, sample_weight=1 + weight_strength * (weights - 1))
+        fit_seconds = perf_counter() - fit_start
+        predict_start = perf_counter()
+        probabilities = model.predict_proba(val_matrix)[:, 1]
+        predict_seconds = perf_counter() - predict_start
+
+        common = {"selected_candidate": candidate_number,
+                  "inner_mean_f1": float(choice["inner_f1"]),
+                  "inner_oof_f1": float(oof_f1), "inner_oof_rows": len(oof_y),
+                  "selected_parameters": params, "weight_strength": weight_strength,
+                  "training_seconds": fit_seconds, "prediction_seconds": predict_seconds,
+                  "search_seconds": model_search_seconds[name], "threshold_seconds": threshold_seconds}
+        for version, cutoff, extra in [
+            ("final_tuned_0.5", 0.5, {"threshold_selection": "fixed 0.5"}),
+            ("final_threshold_optimized", threshold,
+             {"threshold_selection": "selected candidate pooled chronological training OOF"}),
+        ]:
+            metrics = validation_metrics(y_val, probabilities, cutoff)
+            run_id = _log_run(name, version, model, tuned_preprocessor, y_val,
+                              probabilities, cutoff, metrics, report, fit_seconds,
+                              predict_seconds, member,
+                              f"training-only balanced weight strength {weight_strength}",
+                              extra_params={**extra, "selected_candidate": candidate_number,
+                                            "inner_mean_f1": float(choice["inner_f1"]),
+                                            "inner_oof_f1": float(oof_f1),
+                                            "inner_oof_rows": len(oof_y), "seed": seed,
+                                            "weight_strength": weight_strength,
+                                            "search_budget_per_model": len(candidates[name]),
+                                            "search_wall_seconds": search_wall_seconds,
+                                            "search_folds": len(folds),
+                                            **{"selected__" + key: value for key, value in params.items()}},
+                              run_label=f"{member}-{name}-{version}",
+                              run_tags={"search_id": search_id})
+            row = {"model": name, "version": version, "threshold": cutoff,
+                   **metrics, **common, "run_id": run_id}
+            (tuned_results if version == "final_tuned_0.5" else threshold_results).append(row)
+
+    total_seconds = perf_counter() - all_start
+    client = mlflow.MlflowClient()
+    for result in tuned_results + threshold_results:
+        client.log_metric(result["run_id"], "complete_experiment_seconds", total_seconds)
+
+    baseline_by_name = {row["model"]: row for row in baseline_results}
+    tuned_by_name = {row["model"]: row for row in tuned_results}
+    optimized_by_name = {row["model"]: row for row in threshold_results}
+    summary_rows = []
+    for name in model_names:
+        baseline = baseline_by_name[name]
+        tuned = tuned_by_name[name]
+        optimized = optimized_by_name[name]
+        summary_rows.append({
+            "model": name,
+            "baseline_f1": baseline["f1"],
+            "tuned_f1_at_0.5": tuned["f1"],
+            "optimized_f1": optimized["f1"],
+            "selected_parameters": tuned["selected_parameters"],
+            "threshold": optimized["threshold"],
+            "precision": optimized["precision"], "recall": optimized["recall"],
+            "fp": optimized["fp"], "fn": optimized["fn"],
+            "average_precision": optimized["average_precision"],
+            "roc_auc": optimized["roc_auc"],
+            "accuracy": optimized["accuracy"],
+            "training_seconds": tuned["training_seconds"],
+            "search_seconds": tuned["search_seconds"],
+            "prediction_seconds": tuned["prediction_seconds"],
+            "baseline_run_id": baseline["run_id"],
+            "tuned_run_id": tuned["run_id"],
+            "threshold_run_id": optimized["run_id"],
+        })
+    leaderboard = pd.DataFrame(summary_rows).sort_values(
+        ["optimized_f1", "average_precision"], ascending=[False, False]
+    ).reset_index(drop=True)
+    return {
+        "baseline_results": rank_results(baseline_results),
+        "tuned_results": rank_results(tuned_results),
+        "threshold_results": rank_results(threshold_results),
+        "trials": trial_table,
+        "leaderboard": leaderboard,
+        "search_seconds": float(sum(model_search_seconds.values())),
+        "search_wall_seconds": search_wall_seconds,
+        "total_seconds": total_seconds,
+        "tracking_uri": uri,
+        "split": report,
+    }
+
+
+def load_seven_model_experiments(report, tracking_uri=None,
+                                experiment_name="PBI06_FinalOptimization"):
+    """Load the latest complete seven-model experiment and validate its artifacts."""
+    import pandas as pd
+
+    client = evidence_client(tracking_uri)
+    uri = tracking_uri or LOCAL_URI
+    experiment = client.get_experiment_by_name(experiment_name)
+    runs = client.search_runs([experiment.experiment_id], max_results=50000,
+                              order_by=["start_time DESC"])
+    versions = {"final_baseline", "final_tuning_trial", "final_tuned_0.5",
+                "final_threshold_optimized"}
+    grouped = {}
+    for run in runs:
+        version = run.data.tags.get("model_version")
+        search_id = run.data.tags.get("search_id")
+        if run.info.status == "FINISHED" and version in versions and search_id:
+            grouped.setdefault(search_id, []).append(run)
+
+    model_names = set(seven_model_candidates())
+    required_versions = {"final_baseline", "final_tuned_0.5", "final_threshold_optimized"}
+    complete = []
+    for search_id, group in grouped.items():
+        version_models = {}
+        for run in group:
+            version_models.setdefault(run.data.tags["model_version"], set()).add(
+                run.data.tags.get("model_name")
+            )
+        trials = [run for run in group if run.data.tags["model_version"] == "final_tuning_trial"]
+        trial_keys = {(run.data.tags.get("model_name"), int(run.data.params["candidate"]),
+                       int(run.data.params["fold"])) for run in trials}
+        expected_trials = {(name, candidate, fold) for name in model_names
+                           for candidate in (1, 2, 3) for fold in (1, 2)}
+        if all(version_models.get(version) == model_names for version in required_versions) \
+                and len(trials) == 42 and trial_keys == expected_trials:
+            complete.append((max(run.info.start_time for run in group), search_id, group))
+    if not complete:
+        raise RuntimeError("No complete seven-model optimization evidence is saved in local MLflow")
+    _, search_id, group = max(complete)
+    grouped_runs = {}
+    for run in group:
+        key = (run.data.tags["model_version"], run.data.tags.get("model_name"))
+        if key[0] != "final_tuning_trial":
+            grouped_runs[key] = run
+
+    expected_split = {
+        "train_first_date": report["train_first_date"],
+        "train_last_date": report["train_last_date"],
+        "validation_first_date": report["validation_first_date"],
+        "validation_last_date": report["validation_last_date"],
+        "train_rows": report["training_rows"],
+        "validation_rows": report["validation_rows"],
+    }
+
+    result_groups = {"baseline_results": [], "tuned_results": [], "threshold_results": []}
+    candidate_fit_seconds = {name: sum(
+        run.data.metrics["training_seconds"] for run in group
+        if run.data.tags["model_version"] == "final_tuning_trial"
+        and run.data.tags.get("model_name") == name
+    ) for name in model_names}
+    search_wall_seconds = float(next(
+        run.data.params["search_wall_seconds"] for run in group
+        if run.data.tags["model_version"] == "final_tuned_0.5"
+    ))
+    for name in sorted(model_names):
+        for version, result_key in [
+            ("final_baseline", "baseline_results"),
+            ("final_tuned_0.5", "tuned_results"),
+            ("final_threshold_optimized", "threshold_results"),
+        ]:
+            run = grouped_runs[(version, name)]
+            for key, value in expected_split.items():
+                if str(run.data.params.get(key)) != str(value):
+                    raise RuntimeError("Saved seven-model results do not match the current development split")
+            artifact_paths = {item.path.rsplit("/", 1)[-1]
+                              for item in client.list_artifacts(run.info.run_id, "model")}
+            required_artifacts = {"model.joblib", "preprocessor.joblib", "inference.json"}
+            if not required_artifacts.issubset(artifact_paths):
+                raise RuntimeError(f"Required model artifacts are missing for MLflow run {run.info.run_id}: {sorted(artifact_paths)}")
+            for path in ("precision_recall.png", "confusion_matrix.png", "model_parameters.json"):
+                client.download_artifacts(run.info.run_id, path)
+            inference_path = client.download_artifacts(run.info.run_id, "model/inference.json")
+            import json
+            inference = json.loads(Path(inference_path).read_text(encoding="utf-8"))
+            threshold = float(run.data.params["threshold"])
+            if float(inference["threshold"]) != threshold:
+                raise RuntimeError(f"Saved threshold does not match the inference artifact for run {run.info.run_id}")
+            metric_names = ("f1", "precision", "recall", "average_precision", "roc_auc",
+                            "accuracy", "false_positive_rate", "tn", "fp", "fn", "tp",
+                            "training_seconds", "prediction_seconds")
+            row = {"model": name, "version": version, "threshold": threshold,
+                   **{key: run.data.metrics[key] for key in metric_names},
+                   "run_id": run.info.run_id, "search_id": search_id}
+            for key in ("tn", "fp", "fn", "tp"):
+                row[key] = int(row[key])
+            if version != "final_baseline":
+                row["selected_candidate"] = int(run.data.params["selected_candidate"])
+                row["inner_mean_f1"] = float(run.data.params["inner_mean_f1"])
+                row["inner_oof_f1"] = float(run.data.params["inner_oof_f1"])
+                row["inner_oof_rows"] = int(run.data.params["inner_oof_rows"])
+                row["weight_strength"] = float(run.data.params["weight_strength"])
+                row["selected_parameters"] = {
+                    key[len("selected__"):]: value
+                    for key, value in run.data.params.items() if key.startswith("selected__")
+                }
+                row["search_wall_seconds"] = float(run.data.params["search_wall_seconds"])
+            result_groups[result_key].append(row)
+
+    trial_rows = []
+    for run in group:
+        if run.data.tags["model_version"] != "final_tuning_trial":
+            continue
+        params = {key[len("model__"):]: value for key, value in run.data.params.items()
+                  if key.startswith("model__")}
+        trial_rows.append({"model": run.data.tags["model_name"],
+                           "candidate": int(run.data.params["candidate"]),
+                           "fold": int(run.data.params["fold"]),
+                           "inner_f1": run.data.metrics["f1"],
+                           "training_seconds": run.data.metrics["training_seconds"],
+                           "parameters": params,
+                           "weight_strength": float(run.data.params["weight_strength"]),
+                           "run_id": run.info.run_id})
+    trials = pd.DataFrame(trial_rows).sort_values(["model", "candidate", "fold"])
+    baseline_by_name = {row["model"]: row for row in result_groups["baseline_results"]}
+    tuned_by_name = {row["model"]: row for row in result_groups["tuned_results"]}
+    optimized_by_name = {row["model"]: row for row in result_groups["threshold_results"]}
+    leaderboard = []
+    for name in model_names:
+        baseline, tuned, optimized = (baseline_by_name[name], tuned_by_name[name], optimized_by_name[name])
+        leaderboard.append({
+            "model": name, "baseline_f1": baseline["f1"],
+            "tuned_f1_at_0.5": tuned["f1"], "optimized_f1": optimized["f1"],
+            "selected_parameters": tuned["selected_parameters"],
+            "threshold": optimized["threshold"], "precision": optimized["precision"],
+            "recall": optimized["recall"], "fp": optimized["fp"], "fn": optimized["fn"],
+            "average_precision": optimized["average_precision"],
+            "roc_auc": optimized["roc_auc"], "accuracy": optimized["accuracy"],
+            "training_seconds": tuned["training_seconds"],
+            "search_seconds": candidate_fit_seconds[name],
+            "prediction_seconds": tuned["prediction_seconds"],
+            "baseline_run_id": baseline["run_id"], "tuned_run_id": tuned["run_id"],
+            "threshold_run_id": optimized["run_id"],
+        })
+    leaderboard = pd.DataFrame(leaderboard).sort_values(
+        ["optimized_f1", "average_precision"], ascending=[False, False]
+    ).reset_index(drop=True)
+    return {**result_groups, "trials": trials, "leaderboard": leaderboard,
+            "search_id": search_id, "tracking_uri": uri,
+            "search_seconds": sum(candidate_fit_seconds.values()),
+            "search_wall_seconds": search_wall_seconds}
 
 
 def optimize_advanced_thresholds(x_train, y_train, train_dates, x_val, y_val, report,
-                                 advanced_results, tracking_uri=None, member="Han Qian"):
+                                 advanced_results, tracking_uri=None, member="Han Qian", evidence_uri=None):
     """Select thresholds on training-only chronological predictions, then score validation.
 
     Hyperparameters are fixed from the saved advanced search. Those same inner
@@ -538,8 +1097,8 @@ def optimize_advanced_thresholds(x_train, y_train, train_dates, x_val, y_val, re
     if len(advanced_results) != 3 or set(by_name) != {"lightgbm", "catboost", "random_forest"}:
         raise ValueError("Exactly one advanced result is required for each selected model")
     folds = chronological_folds(x_train, train_dates)
-    local_uri = "sqlite:///" + str(Path("artifacts/mlflow/mlflow.db").resolve())
-    _tracking("PBI06_HQ", tracking_uri or local_uri)
+    _tracking("PBI06_HQ", tracking_uri)
+    source = evidence_client(evidence_uri or tracking_uri)
     for name, original in by_name.items():
         current = model_candidates()[name].set_params(**original["selected_changes"]).get_params()
         saved = original["parameters"]
@@ -576,8 +1135,8 @@ def optimize_advanced_thresholds(x_train, y_train, train_dates, x_val, y_val, re
     results = []
     with threadpool_limits(limits=4):
         for name, original in by_name.items():
-            model_file = mlflow.artifacts.download_artifacts(run_id=original["run_id"], artifact_path="model/model.joblib")
-            prep_file = mlflow.artifacts.download_artifacts(run_id=original["run_id"], artifact_path="model/preprocessor.joblib")
+            model_file = source.download_artifacts(run_id=original["run_id"], path="model/model.joblib")
+            prep_file = source.download_artifacts(run_id=original["run_id"], path="model/preprocessor.joblib")
             model = joblib.load(model_file)
             preprocessor = joblib.load(prep_file)
             val = preprocessor.transform(x_val).astype(np.float32)
@@ -644,11 +1203,7 @@ def load_finalized_results(report, tracking_uri=None):
     import json
     import pandas as pd
 
-    local_uri = "sqlite:///" + str(Path("artifacts/mlflow/mlflow.db").resolve())
-    _tracking("PBI06_HQ", tracking_uri or local_uri)
-    if data_hashes() != BASE_DATA_HASHES:
-        raise ValueError("Historical comparison is only valid for the original base files; use the training interface for new data.")
-    client = mlflow.MlflowClient()
+    client = evidence_client(tracking_uri)
     groups = {}
     initial_starts = []
     try:
@@ -663,8 +1218,8 @@ def load_finalized_results(report, tracking_uri=None):
                     if str(run.data.params[key]) != str(report[report_key]):
                         raise ValueError(f"Historical run {run_id} does not match the current split")
                 for path in ("model/model.joblib", "model/preprocessor.joblib", "model/inference.json", "precision_recall.png"):
-                    mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path=path)
-                parameter_file = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="model_parameters.json")
+                    client.download_artifacts(run_id=run_id, path=path)
+                parameter_file = client.download_artifacts(run_id=run_id, path="model_parameters.json")
                 params = json.loads(Path(parameter_file).read_text(encoding="utf-8"))
                 metrics = run.data.metrics
                 row = {"model": name, "version": version, "threshold": float(run.data.params["threshold"]),
@@ -706,7 +1261,7 @@ def load_finalized_results(report, tracking_uri=None):
             trials.append({"model": name, "candidate": candidate, "fold": int(run.data.params["fold"]),
                            "inner_f1": run.data.metrics["f1"], "parameters": changes,
                            "weight_strength": strength, "run_id": run.info.run_id})
-        advanced, advanced_trials = load_saved_advanced_results(report, tracking_uri=local_uri)
+        advanced, advanced_trials = load_saved_advanced_results(report, tracking_uri=tracking_uri)
         if {r["run_id"] for r in advanced} != set(FINAL_COMPARISON_RUNS["advanced_tuned"].values()):
             raise ValueError("Current advanced reference differs from the frozen historical comparison")
         return groups, pd.DataFrame(trials).sort_values(["fold", "model", "candidate"]), advanced_trials
@@ -727,13 +1282,17 @@ SELECTED_MODELS = {
 
 
 def train_selected_models(x_train, y_train, x_val, y_val, split_report, tracking_uri=None,
-                          experiment_name="PBI06_HQ", member="Han Qian", batch_name="retrain"):
+                          experiment_name="PBI06_HQ", member="Han Qian", batch_name="retrain",
+                          *, configurations=None):
     """Refit fixed CatBoost and LightGBM on prepared training data; never search.
 
     Inputs are unencoded PBI 03 feature frames and binary label Series. The
     report must describe their chronological split. Returns per-model metrics,
     MLflow run IDs and model/preprocessor/inference artifact references.
-    No test data or historical model artifact is required.
+    No test data or historical model artifact is required. Pass approved
+    rebuilt configurations as {family: {"params": ..., "weight": ...,
+    "threshold": ...}}. Their thresholds are applied as fixed policy values.
+    Refit scores can drift, so evaluate the fixed policy on supplied validation.
     """
     from src.feature_engineering import INPUT_FEATURES
 
@@ -754,21 +1313,33 @@ def train_selected_models(x_train, y_train, x_val, y_val, split_report, tracking
     train = preprocessor.transform(x_train).astype(np.float32)
     val = preprocessor.transform(x_val).astype(np.float32)
     results = []
+    selected = SELECTED_MODELS if configurations is None else configurations
+    if not selected or not set(selected).issubset(model_candidates()):
+        raise ValueError("Supply known fixed model configurations")
     with threadpool_limits(limits=4):
-        for name, config in SELECTED_MODELS.items():
-            model = model_candidates()[name].set_params(**config["params"])
-            train_input = train.toarray() if name == "catboost" and hasattr(train, "toarray") else train
-            val_input = val.toarray() if name == "catboost" and hasattr(val, "toarray") else val
-            start = perf_counter()
-            _fit_weighted(model, name, train_input, y_train, config["weight_strength"])
-            training_seconds = perf_counter() - start
+        for name, config in selected.items():
+            if configurations is not None:
+                from src.pbi06_research import _fit, _matrix
+                if not 0 <= config["threshold"] <= 1 or not 0 <= config["weight"] <= 1:
+                    raise ValueError("Fixed threshold and weight must be between zero and one")
+                model, training_seconds = _fit(name, config, train, y_train)
+                val_input = _matrix(name, val)
+                weight_strength = config["weight"]
+            else:
+                model = model_candidates()[name].set_params(**config["params"])
+                train_input = train.toarray() if name == "catboost" and hasattr(train, "toarray") else train
+                val_input = val.toarray() if name == "catboost" and hasattr(val, "toarray") else val
+                start = perf_counter()
+                _fit_weighted(model, name, train_input, y_train, config["weight_strength"])
+                training_seconds = perf_counter() - start
+                weight_strength = config["weight_strength"]
             start = perf_counter()
             probabilities = model.predict_proba(val_input)[:, 1]
             prediction_seconds = perf_counter() - start
             metrics = validation_metrics(y_val, probabilities, config["threshold"])
             run_id = _log_run(name, "selected_retrain", model, preprocessor, y_val, probabilities,
                               config["threshold"], metrics, split_report, training_seconds,
-                              prediction_seconds, member, f"training-only balanced weight strength {config['weight_strength']}",
+                              prediction_seconds, member, f"training-only balanced weight strength {weight_strength}",
                               extra_params={"batch_name": batch_name, "selection": "fixed PBI 06 configuration; no search"},
                               run_label=f"{member}-{batch_name}-{name}-selected_retrain",
                               split_description="chronological training/validation; test not supplied")
@@ -780,3 +1351,7 @@ def train_selected_models(x_train, y_train, x_val, y_val, split_report, tracking
                             "preprocessor_uri": base_uri + "/model/preprocessor.joblib",
                             "inference_uri": base_uri + "/model/inference.json"})
     return results
+
+
+# The notebook and programmatic research callers share the same staged workflow.
+from src.pbi06_research import evaluation_dates, research_stages, threshold_curve

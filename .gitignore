@@ -16,12 +16,8 @@ __pycache__/
 
 # Local MLflow tracking database and artifacts
 mlflow-data/
+PBI13_HanQian/
 
-# Locally fitted preprocessing artifacts
-/artifacts/
-
-# Local MLflow tracking database and artifacts
-mlflow-data/
-
+# Notebook model outputs
 saved_models/
 mlruns/

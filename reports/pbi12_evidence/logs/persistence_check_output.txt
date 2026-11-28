@@ -1,0 +1,11 @@
+PBI 12 persistence test 2 - output of: python -m scripts.verify_pbi12_persistence check
+Run on 22 Nov 2026 at about 20:45 SGT, after the Elastic Beanstalk container was replaced
+(new container a97629a175bd, started 12:38:49 UTC). Matching screenshot: ss29.
+
+server: http://mlflow-pbi12.eba-9bnrxizu.us-east-1.elasticbeanstalk.com | run: 1223ed104ad249af965e665cd3072770
+artifacts: ['model/MLmodel', 'model/conda.yaml', 'model/input_example.json', 'model/model.skops', 'model/python_env.yaml', 'model/requirements.txt', 'model/serving_input_example.json']
+PASS  metadata (params)
+PASS  metrics
+PASS  model artifact files
+PASS  registered model version
+PASS  model loads and predicts the same

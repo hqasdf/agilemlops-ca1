@@ -5,8 +5,9 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from src.feature_engineering import INPUT_FEATURES
-from src.train_nithish import (FEATURES, VERSIONS, best_f1_cutoff, prepare_data,
+from src.feature_engineering import INPUT_FEATURES, build_preprocessor
+from src.data_access import VALIDATION_START
+from src.train_nithish import (FEATURES, VERSIONS, best_f1_cutoff, boosting_pipeline, logistic_pipeline, prepare_data,
                                recent_training_window, train_nithish_models)
 
 
@@ -42,9 +43,14 @@ class TrainNithishTests(unittest.TestCase):
 
     def test_schema_is_team_features_plus_first_order_history(self):
         x_train, _, x_val, _, _, _ = self.data
-        self.assertEqual(FEATURES, INPUT_FEATURES + ["days_since_first_order"])
+        self.assertEqual(FEATURES, INPUT_FEATURES)
         self.assertEqual(list(x_train.columns), FEATURES)
         self.assertEqual(list(x_val.columns), FEATURES)
+
+    def test_team_model_pipelines_use_shared_preprocessor(self):
+        shared_type = type(build_preprocessor())
+        self.assertIsInstance(logistic_pipeline().named_steps["prepare"], shared_type)
+        self.assertIsInstance(boosting_pipeline().named_steps["prepare"], shared_type)
 
     def test_days_since_first_order_matches_dates_and_is_never_negative(self):
         customers, orders, labels = self.tables
@@ -65,8 +71,10 @@ class TrainNithishTests(unittest.TestCase):
     def test_split_is_chronological_and_test_is_not_returned(self):
         x_train, _, x_val, _, train_dates, report = self.data
         self.assertLess(report["train_last_date"], report["validation_first_date"])
+        self.assertEqual(report["validation_first_date"], str(VALIDATION_START.date()))
         self.assertEqual(len(train_dates), len(x_train))
-        self.assertEqual(len(x_train) + len(x_val) + report["test_rows"], 3000)
+        self.assertEqual(len(x_train) + len(x_val), 3000)
+        self.assertNotIn("test_rows", report)
 
     def test_cutoff_window_uses_latest_training_dates_only(self):
         train_dates = self.data[4]

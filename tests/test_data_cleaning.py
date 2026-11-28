@@ -3,7 +3,8 @@ import unittest
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
-from src.data_cleaning import clean_customers, clean_orders, clean_labels, check_relationships
+from src.data_cleaning import (clean_customers, clean_orders, clean_labels,
+                               check_relationships, compare_batch_keys)
 
 
 def customer(**changes):
@@ -98,6 +99,42 @@ class CleaningTests(unittest.TestCase):
         assert_frame_equal(first[0], second[0])
         assert_frame_equal(first[1], second[1])
         self.assertEqual(first[2], second[2])
+
+    def test_reports_missing_values_and_flagged_identifiers(self):
+        cleaned, rejected, report = clean_orders(pd.DataFrame([
+            order(order_id="flagged", refund_value=12, order_value=10,
+                  payment_method="new_wallet"),
+            order(order_id="missing", payment_method=None, order_date="bad date", refund_value=0),
+        ]))
+        self.assertEqual(report["missing_values"]["payment_method"], 1)
+        self.assertEqual(report["category_values"]["payment_method"], ["new_wallet"])
+        self.assertEqual(report["issues"]["refund_exceeds_order_value"], 1)
+        self.assertEqual(report["flagged_records"][0]["order_id"], "flagged")
+        self.assertIn("order_date_invalid", report["flagged_records"][1]["issues"])
+        self.assertEqual(len(cleaned), 2)
+        self.assertTrue(rejected.empty)
+
+    def test_new_categories_are_retained(self):
+        cleaned, _, report = clean_orders(pd.DataFrame([
+            order(collect_type="Locker", payment_method="new_wallet")
+        ]))
+        self.assertEqual(cleaned.loc[0, "collect_type"], "locker")
+        self.assertEqual(cleaned.loc[0, "payment_method"], "new_wallet")
+        self.assertEqual(report["category_values"]["collect_type"], ["locker"])
+        self.assertEqual(report["category_values"]["payment_method"], ["new_wallet"])
+
+    def test_historical_overlap_is_reported_for_pipeline_reconciliation(self):
+        incoming = pd.DataFrame([{"country_code": "NA", "order_id": "0001"},
+                                 {"country_code": "MY", "order_id": "new"}])
+        historical = pd.DataFrame([{"country_code": "NA", "order_id": "0001"}])
+        result = compare_batch_keys(incoming, historical, ["country_code", "order_id"])
+        self.assertEqual(result["already_in_history_count"], 1)
+        self.assertEqual(result["new_key_count"], 1)
+        self.assertEqual(result["already_in_history"].loc[0, "order_id"], "0001")
+        self.assertEqual(result["new_keys"].loc[0, "order_id"], "new")
+        with self.assertRaisesRegex(ValueError, "duplicate keys"):
+            compare_batch_keys(pd.concat([incoming, incoming.iloc[[0]]]), historical,
+                               ["country_code", "order_id"])
 
 
 if __name__ == "__main__":
