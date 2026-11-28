@@ -23,6 +23,9 @@ def run_batch(batch_id, tracking_uri, prepare, load, read_updated, train):
     except Exception as exc:
         summary['failed_stage']=stage
         summary['stage_error']=type(exc).__name__
+        if isinstance(exc,ValueError):
+            # Raised by our own download, validation and load checks: say what was wrong.
+            summary['stage_error_message']=' '.join(str(exc).split())[:300]
         if type(exc).__name__ in ('OperationalError','IntegrityError','DataError','ProgrammingError'):
             summary['database_error_code']=exc.args[0] if exc.args and isinstance(exc.args[0],int) else None
             summary['database_error_message']=str(exc.args[1]) if len(exc.args)>1 else ''

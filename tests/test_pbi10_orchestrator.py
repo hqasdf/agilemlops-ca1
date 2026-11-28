@@ -29,6 +29,13 @@ class PipelineTests(unittest.TestCase):
         result=run_batch('batch1','https://mlflow.example',lambda:{},lambda x:{},lambda:'tables',lambda *args:[{'run_id':None}])
         self.assertEqual(result['status'],'failed')
 
+    def test_stage_validation_message_is_reported(self):
+        def bad_load(batch):
+            raise ValueError('orders incompatible with documented schema: collect_type: 1 null values')
+        result=run_batch('batch1','https://mlflow.example',lambda:{},bad_load,lambda:'tables',lambda *args:[])
+        self.assertEqual(result['failed_stage'],'load')
+        self.assertIn('collect_type: 1 null values',result['stage_error_message'])
+
     def test_missing_tracking_fails_before_loading(self):
         events=[]
         with self.assertRaises(ValueError):

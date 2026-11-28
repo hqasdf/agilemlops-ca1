@@ -15,10 +15,14 @@ OPTIONAL = {
     'CA1_DOWNLOAD_TIMEOUT_SECONDS': '30',
     'CA1_DOWNLOAD_MAX_BYTES': '250000000',
 }
+# Values that change from one pipeline run to the next. Command-line options override them.
+RUN_SETTINGS = ('CA1_CUSTOMERS_URL', 'CA1_ORDERS_URL', 'CA1_LABELS_URL', 'CA1_BATCH_ID',
+                'CA1_SEALED_MANIFEST', 'CA1_NEW_ORDER_LEDGER')
+DEFAULT_ENV_FILE = Path(__file__).resolve().parents[1] / '.env'
 SECRETS = ('CA1_DB_PASSWORD',)
 KNOWN = set(REQUIRED) | set(OPTIONAL) | {'CA1_CONFIG_FILE'}
-HELP = ('Set them as environment variables, or put KEY=VALUE lines in a config file and pass it with '
-        '--config PATH or CA1_CONFIG_FILE=PATH. Copy .env.example for the full list of names.')
+HELP = ('Put KEY=VALUE lines in a .env file beside pbi10_pipeline.py, set them as environment variables, '
+        'or pass another file with --config PATH or CA1_CONFIG_FILE=PATH. Copy .env.example for the full list of names.')
 
 
 class ConfigError(ValueError):
@@ -53,6 +57,22 @@ def read_config_file(path):
             value = value[1:-1]
         values[name] = value
     return values
+
+
+def find_config_file(explicit=None, env=None, default=None):
+    """The file named on the command line or in CA1_CONFIG_FILE, otherwise .env if it exists."""
+    env = os.environ if env is None else env
+    default = DEFAULT_ENV_FILE if default is None else Path(default)
+    return explicit or env.get('CA1_CONFIG_FILE') or (default if default.is_file() else None)
+
+
+def read_run_settings(env=None, config_file=None):
+    """Per-run values from the settings file, overridden by the environment. Absent values are ''."""
+    env = os.environ if env is None else env
+    path = config_file or env.get('CA1_CONFIG_FILE')
+    merged = read_config_file(path) if path else {}
+    merged.update({key: value for key, value in env.items() if key in RUN_SETTINGS})
+    return {key: merged.get(key, '').strip() for key in RUN_SETTINGS}
 
 
 def read_config(env=None, config_file=None):
